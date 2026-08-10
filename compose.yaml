@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-porua}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-porua}
+      POSTGRES_DB: ${POSTGRES_DB:-porua}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Compose waits for this before starting the api service.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-porua} -d ${POSTGRES_DB:-porua}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # Source is mounted so uvicorn --reload picks up edits without rebuilding.
+      - .:/code
+      # Uploaded files live on a named volume so they survive a container restart.
+      - uploads:/code/storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  # Named volumes persist across `docker compose down`.
+  # Only `docker compose down -v` deletes them.
+  pgdata:
+  uploads:

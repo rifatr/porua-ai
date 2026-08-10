@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poruaai"
+version = "0.1.0"
+description = "Porua AI — backend for an AI-powered study app"
+requires-python = ">=3.12"
+
+dependencies = [
+    # Web
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",       # file uploads
+    # Config + validation
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # Database
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    # LLM
+    "google-genai>=0.3",
+    # Prompts
+    "jinja2>=3.1",
+    # Documents (slice S5)
+    "pymupdf>=1.24",
+    "python-docx>=1.1",
+    "python-pptx>=1.0",
+    # Maths (slice S6)
+    "sympy>=1.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.8",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+# Put the project root on the import path so `from app...` resolves in tests.
+# uvicorn gets this for free from the working directory; pytest does not.
+pythonpath = ["."]
+asyncio_mode = "auto"
+# Fixtures AND tests must run on the same event loop. The database engine is
+# created once per session; if each test then ran on its own new loop, asyncpg
+# would raise "got Future attached to a different loop" on the first query.
+# Both settings are required — setting only the fixture one is the usual mistake.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
