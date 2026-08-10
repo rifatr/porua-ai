@@ -244,7 +244,7 @@ says why. Building it for a demo dataset would be over-engineering.
 POST   /students                                  create a demo student
 GET    /students/{id}/study-history?from&to&subject&cursor
 
-POST   /rooms                                     title, subject, grade_level
+POST   /rooms                                     title
 GET    /rooms?cursor&limit&subject
 GET    /rooms/{id}                                room details + recent activity
 GET    /rooms/{id}/messages?cursor
@@ -351,7 +351,7 @@ Each skill is a prompt **plus code that checks the result**.
 2. Check it: right number of questions, right number of options, no duplicate options (after
    lowercasing and trimming spaces), exactly one correct answer, wrong options are not just the
    right answer reworded, every question backed by an uploaded file when files exist, language
-   suits the grade level.
+   suits the student's education level.
 3. **Balance the answer positions in code.** Shuffle the options using a fixed random seed, so the
    correct answer is spread evenly across A/B/C/D. Models tend to put the correct answer in the
    same slot. You cannot fix that by asking nicely. Because the seed is fixed, tests get the same
@@ -443,7 +443,7 @@ All prompts live in `prompts/` as files, one per prompt, with a version number.
 Each file starts with a small header: name, version, model, temperature, and a changelog line
 saying what changed and why.
 
-We use Jinja2 for variables, in strict mode. If a prompt expects `{{ grade_level }}` and we forget
+We use Jinja2 for variables, in strict mode. If a prompt expects `{{ education_level }}` and we forget
 to pass it, it raises an error instead of quietly rendering an empty space.
 
 Every saved attempt records the prompt name, version, and a checksum of the exact text. So for any
