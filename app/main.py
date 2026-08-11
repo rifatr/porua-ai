@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.errors import register_error_handlers
-from app.api.routes import health
+from app.api.routes import health, rooms, students
 from app.config import get_settings
 from app.db.session import engine
 
@@ -45,3 +45,5 @@ app = FastAPI(
 
 register_error_handlers(app)
 app.include_router(health.router)
+app.include_router(students.router)
+app.include_router(rooms.router)
