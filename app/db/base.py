@@ -46,12 +46,13 @@ class UUIDPrimaryKey:
     )
 
 
-class TimestampMixin:
-    """created_at / updated_at, both with timezone.
+class CreatedAtMixin:
+    """Adds `created_at`.
 
-    Always store timezone-aware times. A naive timestamp is ambiguous the moment
-    anything runs in a different timezone, and the study-history endpoint filters
-    on these columns.
+    Filled by Postgres with now(), which is the time the *transaction* started,
+    not wall clock. Always timezone-aware. A naive timestamp becomes ambiguous the moment
+    anything runs in another timezone, and the study-history endpoint filters on
+    this column.
     """
 
     created_at: Mapped[datetime] = mapped_column(
@@ -59,6 +60,17 @@ class TimestampMixin:
         nullable=False,
         server_default=func.now(),
     )
+
+
+class UpdatedAtMixin:
+    """Adds `updated_at`, for rows that are edited after they are created.
+
+    Only for genuinely mutable entities — a room being archived, a student being
+    renamed. Event records such as turns and attempts should not use it: they
+    already carry precise lifecycle columns (`completed_at`, `finished_at`) and
+    `updated_at` would state the same fact less clearly.
+    """
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

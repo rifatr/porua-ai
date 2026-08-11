@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKey
+from app.db.base import Base, CreatedAtMixin, UpdatedAtMixin, UUIDPrimaryKey
 
 if TYPE_CHECKING:
     from app.models.room import Room
 
 
-class Student(UUIDPrimaryKey, TimestampMixin, Base):
+class Student(UUIDPrimaryKey, CreatedAtMixin, UpdatedAtMixin, Base):
     __tablename__ = "students"
 
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)

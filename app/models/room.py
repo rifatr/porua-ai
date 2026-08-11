@@ -20,13 +20,13 @@ from sqlalchemy import DateTime, ForeignKey, Index, String, desc, func, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKey
+from app.db.base import Base, CreatedAtMixin, UpdatedAtMixin, UUIDPrimaryKey
 
 if TYPE_CHECKING:
     from app.models.student import Student
 
 
-class Room(UUIDPrimaryKey, TimestampMixin, Base):
+class Room(UUIDPrimaryKey, CreatedAtMixin, UpdatedAtMixin, Base):
     __tablename__ = "rooms"
 
     student_id: Mapped[uuid.UUID] = mapped_column(
