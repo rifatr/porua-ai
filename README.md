@@ -19,7 +19,7 @@ and tests, rather than a layer at a time. The reasoning is in
 |---|---|---|
 | **S0** Spine | Compose, settings, error format, cursor paging, test harness, health checks | ✅ Done |
 | **S1** Rooms | Create / list / open / delete rooms | ✅ Done |
-| **S2** Turns | Talk to Gemini, record every attempt, inspect a turn | ⬜ Not started |
+| **S2** Turns | Talk to Gemini, record every attempt, inspect a turn | ✅ Done |
 | **S3** Reliability | Parse → schema → content checks → repair loop | ⬜ Not started |
 | **S4** Tools | Tool registry with hard limits, study-history and calculator tools | ⬜ Not started |
 | **S5** Documents | Upload and extract `.docx` / `.pdf` / `.pptx`, search over them | ⬜ Not started |
@@ -49,8 +49,8 @@ That's it. Verified from a clean slate (`docker compose down -v` and back up).
 Migrations are run explicitly rather than on container start, so you can see what the database did
 and roll it back by hand.
 
-**A Gemini key is not needed yet** — nothing in S0 or S1 calls the model, and the whole test suite
-runs offline by design (see [Testing](#testing)).
+**A Gemini key is only needed to run a turn.** Everything else — rooms, students, migrations —
+works without one, and the whole test suite runs offline by design (see [Testing](#testing)).
 
 ### Try it
 
@@ -69,10 +69,28 @@ curl -s -X POST localhost:8000/rooms \
 # 3. List rooms. Cursor-paged; feed next_cursor back as ?cursor= for the next page.
 curl -s "localhost:8000/rooms?limit=2" -H "X-Student-Id: $SID" | jq
 
-# 4. Delete a room, twice. Both return 204 — it is idempotent — and the row survives.
+# 4. Ask the tutor something. This is the slow, billable call — expect seconds.
+curl -s -X POST "localhost:8000/rooms/$ROOM_ID/turns" \
+  -H 'Content-Type: application/json' -H "X-Student-Id: $SID" \
+  -d '{"message":"How do I solve 3x + 6 = 15?"}' | jq
+
+# 5. Inspect that turn in full: the prompt sent, its version and checksum, every
+#    model attempt including failures, and token usage.
+curl -s "localhost:8000/turns/$TURN_ID" -H "X-Student-Id: $SID" | jq
+
+# 6. Delete a room, twice. Both return 204 — it is idempotent — and the row survives.
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "localhost:8000/rooms/$ROOM_ID" -H "X-Student-Id: $SID"
 curl -s "localhost:8000/rooms/$ROOM_ID" -H "X-Student-Id: $SID" | jq .archived_at
 ```
+
+Step 5 is the one worth looking at. A real turn against `gemini-2.5-flash` reports something like:
+
+```json
+"tokens": { "prompt": 496, "output": 278, "thought": 1167, "total": 1941 }
+```
+
+Thinking cost four times the visible answer. It is billed and never appears in the reply, which is
+why it is counted separately rather than folded into `output`.
 
 ---
 
@@ -218,9 +236,9 @@ machine-readable; `detail` is written for humans and may change. Clients should 
 
 ## Prompts
 
-**Not yet written** — the first prompt arrives in S2, with the first Gemini call.
+Live in `prompts/<name>/v<N>.md`. Currently one: `tutor_system/v1.md`.
 
-The scheme they will use, since the brief asks for prompts to be *"readable and versioned"*:
+The scheme, since the brief asks for prompts to be *"readable and versioned"*:
 
 - One file per prompt under `prompts/<name>/vN.md`, with YAML front-matter recording name, version,
   model, temperature, and a changelog line saying what changed and **why**.
@@ -237,7 +255,11 @@ The scheme they will use, since the brief asks for prompts to be *"readable and 
 
 Current, honest:
 
-- **Only S0 and S1 are built.** No Gemini integration, documents, tools or skills yet.
+- **S0 to S2 are built.** No validation of model output yet (that is S3, deliberately — see
+  *Important decisions*), and no documents, tools or skills.
+- **Room context is the last 6 turns**, not a summary. Long rooms therefore mean long prompts.
+  The fix is a `room_summaries` table; it is designed, not built.
+- **Turns are synchronous.** A request blocks for the several seconds Gemini takes.
 - **No authentication.** The brief excludes a login flow. `X-Student-Id` is trusted as sent, so
   anyone can act as any student by changing a header. Identity is modelled properly, so adding real
   auth means replacing one dependency rather than reshaping the schema.
@@ -255,12 +277,16 @@ UI, no OCR for scanned PDFs, no streaming responses, no job queue, no vector sea
 ## Testing
 
 ```bash
-docker compose exec api pytest -q      # 31 tests
+docker compose exec api pytest -q      # 54 tests
 docker compose exec api ruff check .
 ```
 
-**The suite runs with no Gemini API key, and will keep doing so.** From S2 onward a fake client
-replays recorded responses. That is not only about cost — you cannot ask the real model to return a
+**The suite runs with no Gemini API key.** `get_llm` is a FastAPI dependency, so tests override it
+with a fake that records the prompts it was given — which is how we assert that the education level
+and the room's earlier turns genuinely reached the model, rather than trusting the template.
+
+Real responses are recorded separately into `tests/fixtures/llm/recorded/` by
+`scripts/record_fixtures.py`, so S3 can build its checks against how the model actually behaves. That is not only about cost — you cannot ask the real model to return a
 quiz with duplicate options on demand, so the failure modes the brief names have to be written by
 hand as fixtures. Testing the reliability layer at all depends on it.
 
