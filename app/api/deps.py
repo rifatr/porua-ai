@@ -14,10 +14,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.errors import NotFoundError, ValidationFailedError
 from app.config import Settings, get_settings
 from app.db.session import get_session
+from app.llm import LLMClient, get_llm_client
 from app.models.student import Student
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
+
+
+def get_llm() -> LLMClient:
+    """The language model client, as a dependency.
+
+    Wrapping the factory in a dependency is what lets tests swap in a fake with
+    `app.dependency_overrides`, so the suite never touches the network. S3 will
+    replace the object this returns with a wrapped, retrying, validating version
+    without any endpoint changing.
+    """
+    return get_llm_client()
+
+
+LLM = Annotated[LLMClient, Depends(get_llm)]
 
 
 async def current_student(

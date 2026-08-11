@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.errors import register_error_handlers
-from app.api.routes import health, rooms, students
+from app.api.routes import health, rooms, students, turns
 from app.config import get_settings
 from app.db.session import engine
 
@@ -40,6 +40,10 @@ app = FastAPI(
         {"name": "health", "description": "Liveness and readiness checks."},
         {"name": "students", "description": "Demo students. Stands in for auth."},
         {"name": "rooms", "description": "Study rooms — one per topic."},
+        {
+            "name": "turns",
+            "description": "One question and answer inside a room. Where the AI runs.",
+        },
     ],
 )
 
@@ -47,3 +51,5 @@ register_error_handlers(app)
 app.include_router(health.router)
 app.include_router(students.router)
 app.include_router(rooms.router)
+app.include_router(turns.rooms_router)
+app.include_router(turns.turns_router)
