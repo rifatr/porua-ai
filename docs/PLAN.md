@@ -116,7 +116,12 @@ write down what is missing.
 | 43 | Table partitioning by month |
 | 44 | A small web page on top of the API |
 
-**Drop order if you are behind:** 44 → 40, then 39 → 31, then stop. Do not touch P0 or P1.
+**This list is a backlog order, not a schedule.** You build slice by slice (§13), so you never sit
+down and "drop item 40" — instead each slice has a core (P0 + P1) you always finish and a trim
+(P2 + P3) you take only if that slice ran early. **See the core/trim table in §13**, which is the
+part you actually use when running late.
+
+Read this list for *why* something matters. Read §13 for *when* to build it and *what* to skip.
 
 ---
 
@@ -501,18 +506,81 @@ it, look like a plan being followed.
 
 ### The slices
 
-| Slice | What it delivers | Tables added |
+**Features** are numbered from §3. A slice is done when its features are done. Read this table
+as the bridge between "what to build" (§3) and "when to build it" (below).
+
+| Slice | What it delivers | Features from §3 | Tables added |
+|---|---|---|---|
+| **S0 Spine** | Docker Compose, settings, database session, error format, paging helper, test setup, `/healthz` | **1**, 14, 24, 25 | `students`, `rooms` |
+| **S1 Rooms** | Create / list / open / delete rooms, with tests and Swagger examples | **2**, 24 | — |
+| **S2 Turns** | `POST /turns` calls Gemini for real, saves the attempt, `GET /turns/{id}` shows it. **No checking yet, on purpose.** | **3**, **4**, **5**, 16, 26, 27, 33, 39 | `turns`, `messages`, `turn_attempts` |
+| **S3 Reliability** | Fixtures prove S2 returns junk. Then build parse → schema → content → repair. | **12**, 17, 27, 28, 38 | — |
+| **S4 Tools** | Tool registry, the five protections, `query_study_history` + `evaluate_expression` | **9**, **13**, 22, 29, 34 | `tool_calls` |
+| **S5 Documents** | Upload, file checking, three extractors, chunking, search, the bad-file cases | **7**, **8**, 23, 30, 37 | `documents`, `document_chunks` |
+| **S6 Skills** | `quiz_builder` and `step_solver` with all their checks | **10**, **11**, 18, 19, 20, 21 | `skill_runs`, `quizzes`, `quiz_questions`, `quiz_choices` |
+| **S7 History** | Study history endpoint over a date range | **6** | — |
+| **S8 Extras** | Everything left in P2, plus P3 if somehow ahead | 31, 32, 35, 40 | `room_summaries` |
+| **S9 Ship** | README, demo script, rubric check, repo, collaborators, archive | **15**, 41, 42 | — |
+
+**Bold = P0**, the features the brief asks for directly. Feature **36** (`docs/DECISIONS.md`) has no
+slice because it is written continuously, a few lines at the end of each one. Features **43** and
+**44** (partitioning, web UI) are not built at all — they go in the README's "what I would do next".
+
+#### What this mapping tells you
+
+- **S6 is the heaviest slice** — six features, two of them P0, and it holds the answer to "how is
+  your skill not just a prompt?" Friday cannot slip.
+- **14 of the 15 P0 features are done by the end of S7.** The last one is #15, the deliverables
+  bundle, which finishes in S9. So **S8 is entirely optional**: if Saturday morning disappears, the
+  submission is still complete against the brief.
+- **A drop decision belongs at a slice boundary, not on Saturday.** Feature 37 is decided when S5
+  starts, 31/32/35 when S8 starts. That is the moment you can see what the time actually costs.
+- **Some features are spread, not owned by one slice**: 14 (Swagger), 24 and 25 (paging and
+  indexes), 36 (decision log), and most of 15 — `.env.example` landed in S0, prompts start in S2,
+  commits are continuous, and only the README is genuinely S9 work. If any of these first appear at
+  the end, they will be thin.
+
+Running count of P0 finished: S0 → 2, S1 → 3, S2 → 6, S3 → 7, S4 → 9, S5 → 11, S6 → 13, S7 → 14,
+S9 → 15.
+
+### How dropping actually works when you build slice by slice
+
+The priority list in §3 is a **backlog** order. The slices are a **schedule**. They do not line up
+on their own: if you are late on Friday inside S5, "drop feature 40" saves you nothing, because
+feature 40 lives in S8 and you were never going to build it that day.
+
+So every slice is split in two. Build the **core** first, always. Take the **trim** only if the
+slice finished early.
+
+| Slice | Core — always build (P0 + P1) | Trim — only if on time (P2 + P3) |
 |---|---|---|
-| **S0 Spine** | Docker Compose, settings, database session, error format, paging helper, test setup, `/healthz` | `students`, `rooms` |
-| **S1 Rooms** | Create / list / open rooms, with tests and Swagger examples | — |
-| **S2 Turns** | `POST /turns` calls Gemini for real, saves the attempt, `GET /turns/{id}` shows it. **No checking yet, on purpose.** | `turns`, `messages`, `turn_attempts` |
-| **S3 Reliability** | Fixtures prove S2 returns junk. Then build parse → schema → content → repair. | — |
-| **S4 Tools** | Tool registry, the five protections, `query_study_history` + `evaluate_expression` | `tool_calls` |
-| **S5 Documents** | Upload, file checking, three extractors, chunking, search, the bad-file cases | `documents`, `document_chunks` |
-| **S6 Skills** | `quiz_builder` and `step_solver` with all their checks | `skill_runs`, `quizzes`, `quiz_questions`, `quiz_choices` |
-| **S7 History** | Study history endpoint over a date range | — |
-| **S8 Extras** | P2 items: `room_summaries`, 4th tool, benchmark, idempotency | `room_summaries` |
-| **S9 Ship** | README, demo script, rubric check, repo, collaborators, archive | — |
+| **S0** | 1, 14, 24, 25 | — |
+| **S1** | 2, 24 | — |
+| **S2** | **3, 4, 5**, 16, 26, 27 | 33 idempotency · 39 retention note |
+| **S3** | **12**, 17, 27, 28 | 38 circuit breaker |
+| **S4** | **9, 13**, 22, 29 | 34 repeat-call dedupe |
+| **S5** | **7, 8**, 23, 30 | 37 heading-aware chunking |
+| **S6** | **10, 11**, 18, 19, 20, 21 | — |
+| **S7** | **6** | — |
+| **S8** | — | 31, 32, 35, 40 — **the whole slice is trim** |
+| **S9** | **15** | 41 CI · 42 mypy |
+
+The two rules that follow:
+
+1. **Late inside a slice → drop that slice's trim, then move on.** Do not let a P2 item push the
+   next slice's core into the following day. A skipped trim item costs one line in the README; a
+   missing core item is a failed requirement.
+2. **Late across days → you simply never reach S8.** No decision needed, because S8 is entirely
+   trim. That is why it was placed last.
+
+Notice that S0, S1, S6 and S7 have no trim at all. There is nothing to shave there — if those run
+long, the time has to come from somewhere else, which is exactly what makes S6 (Friday) the day to
+protect.
+
+**If you are so far behind that only core work remains**, do not thin every slice to fit. Ship
+fewer slices completely. A finished S5 with no S7 beats a half-built version of both, because the
+brief grades "whether the whole thing hangs together as one considered piece of work" — and a
+half-built feature subtracts from that, while a missing one you can explain does not.
 
 **S0 sets the patterns everything else copies.** Error format, paging, session handling, test
 setup. Get these right once and every later slice is a fill-in-the-blank. Get them wrong and you
