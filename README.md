@@ -46,6 +46,14 @@ That's it. Verified from a clean slate (`docker compose down -v` and back up).
 - **Swagger:** <http://localhost:8000/docs>
 - **Health:** `curl localhost:8000/healthz`
 
+**Hot reload is on.** `compose.yaml` mounts the source into the container and uvicorn runs
+with `--reload`, so editing a file on your machine restarts the server. You only need to rebuild
+when a dependency changes:
+
+```bash
+docker compose build api && docker compose up -d
+```
+
 Migrations are run explicitly rather than on container start, so you can see what the database did
 and roll it back by hand.
 
@@ -91,6 +99,122 @@ Step 5 is the one worth looking at. A real turn against `gemini-2.5-flash` repor
 
 Thinking cost four times the visible answer. It is billed and never appears in the reply, which is
 why it is counted separately rather than folded into `output`.
+
+---
+
+## Running without Docker
+
+If you would rather run the app on your machine and keep only Postgres in a container. Verified on Python 3.14 — every dependency has a wheel, nothing needs compiling.
+
+```bash
+docker compose up -d db              # Postgres only; port 5432 is published
+
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+**One gotcha.** `.env` points `DATABASE_URL` at the host `db`, which is the service name and only resolves *inside* Docker. From your machine it must be `localhost`:
+
+```bash
+export DATABASE_URL="postgresql+asyncpg://porua:porua@localhost:5432/porua"
+```
+
+A real environment variable takes priority over `.env`, so exporting it is enough — no need to edit the file and risk committing a broken one.
+
+```bash
+alembic upgrade head
+uvicorn app.main:app --reload        # http://localhost:8000
+```
+
+Use `--port 8001` if the container is still running on 8000.
+
+---
+
+## Everyday commands
+
+Every command works either way. Inside Docker, prefix with `docker compose exec api`; on your machine, run it directly with the virtualenv active and `DATABASE_URL` exported.
+
+### Tests
+
+```bash
+pytest                       # all 54
+pytest -q                    # quiet
+pytest tests/test_turns.py   # one file
+pytest -k "cursor"           # by name
+pytest -x -vv                # stop at the first failure, verbose
+```
+
+Tests create and use a **separate database**, `porua_test`, built from the models and dropped fresh each run. They never touch your development data — and never call Gemini.
+
+### Linting
+
+```bash
+ruff check .                 # report
+ruff check . --fix           # fix what is safely fixable
+```
+
+### Migrations
+
+```bash
+# 1. change a model in app/models/, then draft a migration from the difference
+alembic revision --autogenerate -m "add_document_chunks"
+
+# 2. READ AND EDIT THE GENERATED FILE. Autogenerate is a draft, not an answer.
+#    It reliably misses partial indexes, CHECK constraints, generated columns,
+#    enum drops, and every data migration.
+
+# 3. apply it
+alembic upgrade head
+
+# 4. prove it reverses — a migration that cannot be undone cannot be tested
+alembic downgrade -1
+alembic upgrade head
+
+# 5. confirm the models and the migrations now agree
+alembic check                # must say: No new upgrade operations detected
+```
+
+Other useful ones:
+
+```bash
+alembic current              # which revision is applied
+alembic history --verbose    # the chain
+alembic downgrade base       # unwind everything
+```
+
+`alembic check` has already caught two real bugs in this project: a column type that had drifted
+from its model, and an enum type that was created but never dropped on downgrade.
+
+### Resetting the database
+
+```bash
+docker compose down -v       # -v deletes the volume, so all data goes
+docker compose up -d
+docker compose exec api alembic upgrade head
+```
+
+Without `-v` the volume survives, which is how *"data must persist between runs"* is verified:
+
+```bash
+docker compose restart api
+curl -s localhost:8000/rooms -H "X-Student-Id: $SID"   # your rooms are still there
+```
+
+### Recording Gemini fixtures
+
+Only needed after changing a prompt, and it costs real quota:
+
+```bash
+docker compose exec -e LLM_FIXTURE_MODE=record api python scripts/record_fixtures.py
+```
+
+### Watching what the app is doing
+
+```bash
+docker compose logs -f api                    # follow
+docker compose exec db psql -U porua -d porua # a SQL prompt
+```
 
 ---
 
@@ -276,10 +400,7 @@ UI, no OCR for scanned PDFs, no streaming responses, no job queue, no vector sea
 
 ## Testing
 
-```bash
-docker compose exec api pytest -q      # 54 tests
-docker compose exec api ruff check .
-```
+Commands are under [Everyday commands](#everyday-commands).
 
 **The suite runs with no Gemini API key.** `get_llm` is a FastAPI dependency, so tests override it
 with a fake that records the prompts it was given — which is how we assert that the education level
