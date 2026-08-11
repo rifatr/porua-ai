@@ -29,13 +29,22 @@ from app.api.errors import ValidationFailedError
 
 @dataclass(frozen=True)
 class Cursor:
-    """The position of the last row on the previous page."""
+    """The position of the last row on the previous page.
 
-    sort_value: datetime
+    The sort value is a timestamp for some lists (rooms, by last activity) and an
+    integer for others (turns, by sequence number). The encoded cursor records
+    which, so decoding restores the right type instead of guessing.
+    """
+
+    sort_value: datetime | int
     id: UUID
 
     def encode(self) -> str:
-        raw = json.dumps({"v": self.sort_value.isoformat(), "id": str(self.id)})
+        if isinstance(self.sort_value, datetime):
+            kind, value = "dt", self.sort_value.isoformat()
+        else:
+            kind, value = "n", int(self.sort_value)
+        raw = json.dumps({"t": kind, "v": value, "id": str(self.id)})
         return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
     @classmethod
@@ -43,7 +52,10 @@ class Cursor:
         try:
             padded = value + "=" * (-len(value) % 4)
             data = json.loads(base64.urlsafe_b64decode(padded).decode())
-            return cls(sort_value=datetime.fromisoformat(data["v"]), id=UUID(data["id"]))
+            sort_value: datetime | int = (
+                datetime.fromisoformat(data["v"]) if data["t"] == "dt" else int(data["v"])
+            )
+            return cls(sort_value=sort_value, id=UUID(data["id"]))
         except Exception as exc:  # malformed cursors are user error, not a crash
             raise ValidationFailedError("The cursor parameter is not valid.") from exc
 
