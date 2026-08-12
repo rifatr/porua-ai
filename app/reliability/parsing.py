@@ -5,6 +5,13 @@ sometimes do. The rest of the time they wrap it in ```json fences, introduce it
 with "Here is the JSON:", add a closing remark, or run out of output budget
 halfway through the answer.
 
+Requests now also carry a `response_schema`, so Gemini is constrained to emit the
+right shape and most of the above stops happening. This layer stays anyway, and
+not out of sentiment: the schema is a field a provider is free to ignore, the
+replay fixtures include hand-written malformations that must still be rejected,
+and constrained decoding does nothing about truncation — the model can still be
+cut off mid-object, which is the one failure below that costs a repair.
+
 The dividing line used throughout this module: **recover what can be recovered
 without guessing at meaning; fail everything else.**
 
@@ -115,11 +122,27 @@ def extract_json(raw: str) -> dict:
         candidate = _first_object(text)
         if candidate is None:
             if "{" in text:
+                # This deliberately does not tell the model its answer was too
+                # long. Truncation has two causes and this layer cannot tell them
+                # apart: the model genuinely overran, or it spent the shared
+                # thinking-plus-output budget on thinking and had nothing left to
+                # write the answer with. The second is the common one, and it is
+                # the one the model cannot fix however firmly it is asked — so
+                # "keep the answer shorter" reads as a diagnosis, is usually the
+                # wrong one, and spends both repair attempts acting on it.
+                #
+                # Telling the two apart needs `finish_reason`, which lives on
+                # LLMResponse and never reaches the parser. Routing MAX_TOKENS to
+                # the retry path instead is the real fix; see README "What I would
+                # do with more time". Until then the wording asks for the one thing
+                # that is true in both cases — finish the object — and offers
+                # brevity as a conditional, not a cause.
                 raise _fail(
                     "JSON_TRUNCATED",
-                    "The JSON object was never closed — the response stopped "
-                    "partway through. Reply again with the complete object, and "
-                    "keep the answer shorter so it fits.",
+                    "The reply stopped partway through, so the JSON object was "
+                    "never closed and none of it could be read. Send the whole "
+                    "object this time, ending with its closing brace. If the "
+                    "answer was long, shorten it to make room.",
                 ) from None
             raise _fail(
                 "NO_JSON_FOUND",
