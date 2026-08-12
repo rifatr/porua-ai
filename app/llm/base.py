@@ -72,7 +72,7 @@ class LLMRequest:
     prompt: str
     model: str
     temperature: float
-    max_output_tokens: int = 2048
+    max_output_tokens: int = 4096
     extra: dict = field(default_factory=dict)
 
     def as_params(self) -> dict:
