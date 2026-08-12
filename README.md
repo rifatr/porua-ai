@@ -20,7 +20,7 @@ and tests, rather than a layer at a time. The reasoning is in
 | **S0** Spine | Compose, settings, error format, cursor paging, test harness, health checks | ✅ Done |
 | **S1** Rooms | Create / list / open / delete rooms | ✅ Done |
 | **S2** Turns | Talk to Gemini, record every attempt, inspect a turn | ✅ Done |
-| **S3** Reliability | Parse → schema → content checks → repair loop | ⬜ Not started |
+| **S3** Reliability | Parse → schema → content checks → repair loop, with retries | ✅ Done |
 | **S4** Tools | Tool registry with hard limits, study-history and calculator tools | ⬜ Not started |
 | **S5** Documents | Upload and extract `.docx` / `.pdf` / `.pptx`, search over them | ⬜ Not started |
 | **S6** Skills | Quiz builder and step-by-step maths solver, both verified in code | ⬜ Not started |
@@ -203,11 +203,16 @@ curl -s localhost:8000/rooms -H "X-Student-Id: $SID"   # your rooms are still th
 
 ### Recording Gemini fixtures
 
-Only needed after changing a prompt, and it costs real quota:
+Needed after changing a prompt — a fixture is keyed by the exact request text, so an edited prompt
+makes existing recordings unreachable. Costs real quota (currently 4 calls):
 
 ```bash
 docker compose exec -e LLM_FIXTURE_MODE=record api python scripts/record_fixtures.py
 ```
+
+It prints, per scenario, the token usage and whether the response passed the validation pipeline.
+Anything rejected there is a real prompt weakness worth a new version, not a fluke. Delete the old
+files in `tests/fixtures/llm/recorded/` when re-recording after a prompt change.
 
 ### Watching what the app is doing
 
@@ -247,13 +252,22 @@ app/
     deps.py         FastAPI dependencies — the only place identity enters
     routes/         HTTP layer: thin, no business logic
   db/               engine, session, declarative base + naming convention
+  llm/              the provider boundary: one Protocol, a Gemini client, record/replay
+  reliability/      parse → schema → content. Pure functions, no I/O, no database
   models/           SQLAlchemy models (the database)
+  prompts/          the loader; the prompt text itself lives in prompts/ at the root
   schemas/          Pydantic models (the API contract) — deliberately separate
   services/         business logic; every function is scoped to one student
 migrations/         Alembic; one migration per slice
+prompts/            versioned prompt files, one directory per prompt
 tests/
 docs/               the brief, the plan, the assumptions register
 ```
+
+`reliability/` never calls the model and never touches the database — it only answers "is this
+response acceptable, and if not, exactly what is wrong with it". Deciding to *call again* is a
+decision about the turn, because it costs money and writes a row, so it lives in
+`services/turn.py`. That split is why the checks run in microseconds and the loop is readable.
 
 `models/` and `schemas/` are kept apart on purpose: the API contract should not shift every time a
 column is added, and internal columns should never be exposed by accident.
@@ -263,6 +277,78 @@ column is added, and internal columns should never be exposed by accident.
 ## Important decisions
 
 Fuller reasoning for each is in [`docs/PLAN.md`](docs/PLAN.md). These are the ones I would defend.
+
+### Nothing unchecked reaches the student
+
+The brief's instruction — *"assume the Gemini model will sometimes ignore instructions, return
+malformed data, or produce structurally valid but poor content"* — names three different problems,
+so `app/reliability/` answers them in three separate layers:
+
+| Layer | Question | Does what |
+|---|---|---|
+| **parse** | Is it JSON? | Strips code fences and surrounding chatter. Rejects truncation, prose, arrays. |
+| **schema** | Is it the *right* JSON? | Pydantic. Rejects a missing `concepts`, `in_scope` sent as `"yes"`. |
+| **tidy** | Can code just fix it? | Removes duplicate tags, blanks, tags on an off-topic turn. **Never rejects.** |
+| **content** | What is left? | Three rules: blank answer, runaway length, declining and then answering anyway. |
+
+A rejected response is not thrown away. Its failures are written to the attempt row and fed into
+`tutor_repair/v1.md`, which names the exact problems and shows the model its own rejected output.
+Two repairs are allowed. After that the turn **fails with no answer** rather than returning
+something unchecked.
+
+**The rule: a turn either carries a result that passed every check, or it carries nothing and says
+why.** There is no middle state. `tests/test_reliability.py::test_nothing_invalid_is_ever_saved_or_returned`
+is the assertion the whole project rests on.
+
+Three decisions inside this are worth defending:
+
+**Reject only what code cannot correct.** A repair costs real money, costs the student several
+seconds, and *might not work*. A line of Python costs nothing and *always* works. So a ```` ```json ````
+fence is stripped for free, Markdown written with real line breaks is re-read as sent, and a
+duplicate tag is deduped in code — none of them cost a call. Truncated JSON is rejected, because
+closing the braces means inventing the end of a sentence the student is about to read. The line is
+"does fixing this require guessing at meaning".
+
+This was got wrong first: the content layer had ten rules, of which four were string operations
+outsourced to a language model and four more were only taste. It has three. Each defends the
+student or the data; there is no fourth thing a model is needed for.
+
+**A check must not fight the person it protects.** The word limit rejects at 800, not the 250 the
+prompt asks for, because the prompt itself allows more *"unless the student explicitly asks for
+more detail"* — and the check never sees the student's message. At 350 it threw away well-judged
+answers from students who asked for depth and paid to replace them with worse ones. At 800 it is a
+runaway guard that catches a model which has lost the plot and never argues with a student. A
+banned-openings rule went entirely for the same reason: it rejected *"Absolutely convergent
+series…"*, a correct sentence in a maths room.
+
+**Retries and repairs are separate budgets, both spent in the same loop.** A rate limit re-sends the
+*same* prompt; a bad answer sends a *different* one. Two rate limits and two bad answers are
+different problems, and one counter would hide which you had. They share a loop rather than sitting
+in a client wrapper because a retry hidden in a wrapper writes no row — a turn that took four
+seconds because of two 429s would look identical to one that was merely slow, and the inspection
+endpoint would be quietly lying.
+
+`ResponseBlocked` is the one error never retried: retrying something nondeterministic is sensible,
+retrying a decision is not.
+
+### The tutor returns JSON, not prose
+
+`tutor_system` v2 returns `{answer, in_scope, concepts}`. v1 returned prose, and every field here
+exists because something reads it:
+
+- **`in_scope`** — v1's prompt already told the tutor to decline off-topic questions, but the
+  verdict was buried in the prose, so nothing could act on it. An algebra room asked about football
+  still fed that exchange back into the next prompt as context. Now off-topic turns are filtered out
+  of the context window, and S7 can exclude them from study history.
+- **`concepts`** — short topic tags. This is what lets study history answer *"what did I study"*
+  rather than only *"which rooms did I open"*. Stored as `jsonb` with a GIN index rather than a join
+  table: concepts here are per-turn labels with no identity of their own — nothing renames or merges
+  them — so a table would add a join and answer no question the index cannot.
+
+The cost is honest: asking for JSON creates the malformed-output problem in the first place. Gemini's
+own `response_schema` would remove most parse failures, and in production I would use it. I did not
+here for two reasons — it is provider-specific, and it does nothing about the content layer, which
+is the half the brief actually cares about.
 
 ### Every model attempt is a database row, not a log line
 
@@ -360,7 +446,18 @@ machine-readable; `detail` is written for humans and may change. Clients should 
 
 ## Prompts
 
-Live in `prompts/<name>/v<N>.md`. Currently one: `tutor_system/v1.md`.
+Live in `prompts/<name>/v<N>.md`. Currently two:
+
+| Prompt | Temp | What it is for |
+|---|---|---|
+| `tutor_system/v2.md` | 0.4 | The tutor. Pinned to the student's education level and the room topic. |
+| `tutor_repair/v1.md` | 0.1 | Sent only after a response was rejected. Names the exact failures and shows the model its own rejected output. |
+
+`tutor_system/v1.md` is kept, unedited, because stored attempts still reference its checksum.
+
+The repair prompt runs colder on purpose: it is not being asked to be creative, it is being asked
+to comply. It is also deliberately short — it does not repeat the tutor's full rules, only the
+output format, the specific failures, and the original question.
 
 The scheme, since the brief asks for prompts to be *"readable and versioned"*:
 
@@ -379,10 +476,19 @@ The scheme, since the brief asks for prompts to be *"readable and versioned"*:
 
 Current, honest:
 
-- **S0 to S2 are built.** No validation of model output yet (that is S3, deliberately — see
-  *Important decisions*), and no documents, tools or skills.
-- **Room context is the last 6 turns**, not a summary. Long rooms therefore mean long prompts.
-  The fix is a `room_summaries` table; it is designed, not built.
+- **S0 to S3 are built.** No documents, tools or skills yet.
+- **Room context is the last 6 in-scope turns**, not a summary. Long rooms therefore mean long
+  prompts. The fix is a `room_summaries` table; it is designed, not built.
+- **`tests/fixtures/llm/recorded/` is empty.** A fixture is keyed by the exact request, prompt text
+  included, so moving to `tutor_system` v2 made the four recordings taken against v1 unreachable
+  rather than merely stale. Re-record with one command — see [Recording Gemini
+  fixtures](#recording-gemini-fixtures). Nothing in the test suite depends on them; they exist to
+  check the prompt against real model behaviour.
+- **The content checks are tuned to English.** Word counts and the filler-opening list would both
+  need rethinking for Bangla, which matters for this product specifically.
+- **A repaired turn costs the student the extra wait.** Two repairs can mean three sequential Gemini
+  calls before an answer appears. Streaming a first draft and correcting it is not possible while
+  the guarantee is "nothing unchecked reaches the student".
 - **Turns are synchronous.** A request blocks for the several seconds Gemini takes.
 - **No authentication.** The brief excludes a login flow. `X-Student-Id` is trusted as sent, so
   anyone can act as any student by changing a header. Identity is modelled properly, so adding real
@@ -406,10 +512,18 @@ Commands are under [Everyday commands](#everyday-commands).
 with a fake that records the prompts it was given — which is how we assert that the education level
 and the room's earlier turns genuinely reached the model, rather than trusting the template.
 
-Real responses are recorded separately into `tests/fixtures/llm/recorded/` by
-`scripts/record_fixtures.py`, so S3 can build its checks against how the model actually behaves. That is not only about cost — you cannot ask the real model to return a
-quiz with duplicate options on demand, so the failure modes the brief names have to be written by
-hand as fixtures. Testing the reliability layer at all depends on it.
+Fixtures come in two kinds, and the reliability layer would be untestable without both:
+
+- **Recorded** — `tests/fixtures/llm/recorded/`, written by `scripts/record_fixtures.py` against
+  the real API. These capture what the model actually does, which is the only way to find out
+  whether a prompt works. The script now runs each response through the real validation pipeline and
+  prints the verdict, so "does the model comply with this prompt" is answered with evidence.
+- **Hand-written** — `tests/fixtures/llm/synthetic/`, one file per failure mode, with a
+  [README](tests/fixtures/llm/synthetic/README.md) mapping each to its expected outcome. These
+  cannot be recorded: you cannot ask Gemini for truncated JSON, or a quiz with duplicate options, on
+  demand. That is precisely why the failure modes the brief names need them.
+
+Recorded fixtures alone would only ever test the model on its good days.
 
 Two properties worth knowing:
 
@@ -427,8 +541,7 @@ that was never dropped on downgrade, and a column type that had diverged from it
 
 In priority order:
 
-1. **Finish S2–S7.** The reliability layer is the centre of the brief and the most interesting part
-   of the problem.
+1. **Finish S4–S7.** Tools, documents, skills and study history.
 2. **Rolling room summaries.** Long rooms currently mean long context. A `room_summaries` table
    storing a summary up to turn N would make opening a 500-turn room cost the same as a 5-turn one.
    Designed in [`docs/PLAN.md` §5](docs/PLAN.md), not built.

@@ -59,6 +59,33 @@ the validation failures. If a failure path skips persistence, the inspection end
 **9. Idempotency.** Turn creation honours `Idempotency-Key` so a client retry does not
 double-spend tokens.
 
+## The counterweight: every check must earn its cost
+
+Everything above hunts for *missing* validation. This section hunts for the opposite, because
+over-validation is the failure this project actually made first, and it is invisible to an
+adversarial audit that only asks "what gets through".
+
+A repair call costs real money and several seconds of a student's wait, and it **might not work**.
+A line of Python costs nothing and **always** works. So:
+
+**Reject only what code cannot correct.** For every validator, ask what happens if it fires:
+
+- Could code just *fix* this? Duplicate list entries, blank strings, a `#` heading that should be
+  `###`, a leading "Great question!", trailing whitespace, values that must be empty given another
+  field — all of these are string operations. Asking a language model to perform them is a finding.
+- Does anything downstream actually break if it passes? If the answer is "it is a bit untidy", the
+  check is taste, not reliability. Delete it.
+- Can it fire on legitimate output? A word-count ceiling that ignores a student asking for more
+  detail rejects the correct answer and pays to replace it with a worse one. A prefix match on
+  "absolutely" rejects "Absolutely convergent series…". Both are findings.
+
+The resulting shape is three layers, not two: **parse → schema → fix up in code → check what is
+left → repair**. A validator that survives that filter defends the student or the data. One that
+does not is an opinion with a bill attached.
+
+State the count in the finding: "seven content checks, of which four are string operations and one
+has a false positive on legitimate maths prose" is worth more than a list of suggestions.
+
 ## How to work
 
 Read code, do not trust names — a function called `validate_quiz` may validate nothing. Where a
