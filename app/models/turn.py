@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -37,7 +38,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     desc,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,6 +55,29 @@ class TurnStatus(enum.StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class TurnFailureReason(enum.StrEnum):
+    """Every reason a turn can fail, in one place.
+
+    Listed together because this is what a client branches on, and a list spread
+    across three modules is one nobody can read. The first three mirror
+    `LLMError.error_type` exactly — a test asserts they stay in step, so the
+    duplication cannot drift.
+    """
+
+    # The call itself did not produce usable text.
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    EMPTY_RESPONSE = "EMPTY_RESPONSE"
+    RESPONSE_BLOCKED = "RESPONSE_BLOCKED"
+
+    # We got text every time, and every version of it was rejected. The attempts
+    # carry `validation_failures` saying which layer objected and why.
+    INVALID_AFTER_REPAIR = "INVALID_AFTER_REPAIR"
+
+    # The per-turn ceiling on model calls was reached. Unreachable with the
+    # default budgets; see services/turn.py.
+    ATTEMPT_LIMIT_EXCEEDED = "ATTEMPT_LIMIT_EXCEEDED"
 
 
 TURN_STATUS_SQL_TUPLE = str(tuple(s.value for s in TurnStatus))
@@ -76,6 +102,24 @@ class Turn(UUIDPrimaryKey, CreatedAtMixin, Base):
     # NULL until the turn succeeds. A failed turn never has an answer — the whole
     # point is that nothing half-checked reaches the student.
     answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Did the question belong in this room? The tutor prompt has always told the
+    # model to decline off-topic questions, but until S3 the verdict was buried in
+    # prose and nothing could act on it. Stored, it has three readers: the context
+    # builder skips off-topic turns so a detour does not pollute the next prompt,
+    # study history excludes them so a stray question is not counted as studying
+    # the subject, and the API returns it. NULL only while the turn is unfinished.
+    in_scope: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # Short topic tags for what this turn taught, e.g. ["inverse operations"].
+    #
+    # A JSONB list rather than a turn_concepts join table, deliberately. Concepts
+    # here are per-turn labels, never entities in their own right: nothing renames
+    # them, merges them, or hangs data off them. The only questions asked of them —
+    # "what did this student study between two dates", "which turns touched X" —
+    # are answered by a GIN index on this column without a join. A table would
+    # become the right answer the moment a concept needs an identity of its own.
+    concepts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     status: Mapped[str] = mapped_column(
         String(16),
@@ -118,13 +162,34 @@ class Turn(UUIDPrimaryKey, CreatedAtMixin, Base):
         UniqueConstraint("room_id", "seq", name="uq_turns_room_id_seq"),
         CheckConstraint(f"status IN {TURN_STATUS_SQL_TUPLE}", name="status_is_valid"),
         CheckConstraint("seq > 0", name="seq_is_positive"),
-        # An answer only exists on success, and a failure always says why.
+        # An answer only exists on success, and a failure always says why. A
+        # succeeded turn also knows whether it was in scope — that verdict is part
+        # of a complete answer, not an optional extra.
         CheckConstraint(
-            "(status = 'succeeded' AND answer_text IS NOT NULL)"
+            "(status = 'succeeded' AND answer_text IS NOT NULL AND in_scope IS NOT NULL)"
             " OR (status = 'failed' AND failure_reason IS NOT NULL)"
             " OR status = 'running'",
             name="terminal_states_are_complete",
         ),
+        # `reliability.checks.tidy` already clears the tags on an out-of-scope
+        # turn, in code and for free, so nothing the pipeline writes can break
+        # this. That is exactly what makes it a safety net rather than a duplicate
+        # rule: it holds for rows that arrive from a script or a future code path
+        # that forgets. Study history depends on it — an off-topic turn must not
+        # contribute study time.
+        CheckConstraint(
+            "in_scope IS NOT FALSE OR concepts IS NULL OR concepts = '[]'::jsonb",
+            name="off_topic_turns_teach_nothing",
+        ),
         # The room timeline: newest turn first.
         Index("ix_turns_room_id_seq", "room_id", desc("seq")),
+        # Answers "which turns touched this concept" without reading every row.
+        # GIN is the index type for containment queries on JSONB (`concepts ? 'x'`);
+        # a B-tree cannot answer them, because the value is a list, not a scalar.
+        Index(
+            "ix_turns_concepts",
+            "concepts",
+            postgresql_using="gin",
+            postgresql_where=text("concepts IS NOT NULL"),
+        ),
     )
