@@ -30,7 +30,18 @@ class Settings(BaseSettings):
     tool_timeout_seconds: int = 8
     max_tool_calls_per_turn: int = 6
     max_agent_iterations: int = 5
+
+    # --- Reliability (PLAN.md section 9) ---
+    # Two independent budgets. A network retry re-sends the *same* prompt after a
+    # provider error; a repair sends a *different* prompt because the response was
+    # unusable. Keeping them apart matters: three 429s and three bad answers are
+    # different problems, and collapsing them into one counter would hide that.
+    max_network_retries: int = 2
     max_repair_attempts: int = 2
+    retry_base_delay_seconds: float = 0.5
+    # Backstop over both budgets, so no combination of them can run away. Nothing
+    # should ever reach it; if a turn does, that is a bug worth seeing in the data.
+    max_attempts_per_turn: int = 6
 
     # --- Paging ---
     default_page_size: int = 20
