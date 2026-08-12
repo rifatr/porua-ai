@@ -54,6 +54,22 @@ class TurnRead(BaseModel):
         default=None,
         description="Typed reason, set only when status is 'failed'.",
     )
+    in_scope: bool | None = Field(
+        default=None,
+        description=(
+            "False when the tutor declined because the question belonged to "
+            "another subject. Off-topic turns are not replayed as context and do "
+            "not count towards study history. Null if the turn did not finish."
+        ),
+    )
+    concepts: list[str] | None = Field(
+        default=None,
+        description=(
+            "Short tags for what this turn taught. Empty when it taught nothing — "
+            "a greeting, or an off-topic question."
+        ),
+        examples=[["inverse operations", "linear equations"]],
+    )
     created_at: datetime
 
     # No timing here on purpose. This is the conversation view — a chat
@@ -87,7 +103,22 @@ class AttemptRead(BaseModel):
     error_detail: str | None
     validation_failures: list | None = Field(
         default=None,
-        description="Which content checks this response failed. Populated from S3.",
+        description=(
+            "Why this response was rejected, if it was. Each entry carries the "
+            "`layer` that objected (parse, schema or content), a stable `code`, "
+            "and the `detail` that was sent to the model to repair it. Null means "
+            "the response was accepted."
+        ),
+        examples=[
+            [
+                {
+                    "layer": "content",
+                    "code": "DUPLICATE_CONCEPTS",
+                    "detail": "These concepts appear more than once...",
+                    "field": "concepts",
+                }
+            ]
+        ],
     )
     started_at: datetime
     finished_at: datetime | None
@@ -144,6 +175,8 @@ class TurnDetail(TurnRead):
             answer_text=turn.answer_text,
             status=turn.status,
             failure_reason=turn.failure_reason,
+            in_scope=turn.in_scope,
+            concepts=turn.concepts,
             created_at=turn.created_at,
             completed_at=turn.completed_at,
             duration_ms=turn.duration_ms,
