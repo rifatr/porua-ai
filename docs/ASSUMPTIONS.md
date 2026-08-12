@@ -47,6 +47,16 @@ assumptions section.
 
 ---
 
+## Decisions taken during S4 (tools)
+
+| Topic | The ambiguity | Decision | Reasoning |
+|---|---|---|---|
+| **Which tools to build** | "At least 2 tools of your own" — from an unlimited field of options. | Three, chosen against a written four-part test, with every rejected option recorded next to the rule it failed. Test and list in [`PLAN.md` §8](./PLAN.md). | A list of tools is easy to write and hard to defend. The brief grades "what you chose to prioritize" and "what you deliberately left alone", so the rule used to choose is worth more than the choices. |
+| **Code execution** | Genuinely the highest-value tool for a study app, and the brief also says "the model should not call arbitrary code". | Built as `evaluate_expression` — an AST allow-list covering expressions only. A general sandbox is in the README's "with more time". | It *is* code execution, scoped to the part that can be proved safe. A general sandbox needs container isolation, no network, memory and PID limits, a hard timeout and hang-proof cleanup. Miss the PID limit and a fork bomb wins. Shipping a small provably-safe thing beats a large probably-safe one, especially when two required slices are still unbuilt. |
+| **The brief's example topics** | Rooms are "for a topic **such as** AP Biology or Grade 7 Algebra". | Treated as illustrations, not limits. A student can open a room about Python. | The brief says the scope is "deliberately open-ended so we can see your judgment". Using its examples to draw product boundaries would be reading them as instructions, which is the opposite of what it asked for. Nothing in the schema restricts a room's topic — `title` is free text. |
+
+---
+
 ## Verify before submitting
 
 `ikramhasan` and `azmainadel` are GitHub usernames read out of a PDF. Confirm both resolve to

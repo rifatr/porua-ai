@@ -330,20 +330,54 @@ instructions*. Uploaded files come from outside, so we do not let them give orde
 **Tools** = things the model can call during a chat.
 **Skills** = structured jobs that produce a checked result (a quiz, a solved problem).
 
+### The test a tool has to pass
+
+Long lists of tools are easy to write and hard to defend. Every tool below was picked with the
+same four questions, and the ones that failed are listed too, with the reason. On the call, *why
+these and not those* is the question — so the test matters more than the list.
+
+**A tool earns its place only if all four are true:**
+
+1. **The model cannot answer without it.** It needs private data, or exact computation. If the
+   answer is already in the prompt, a tool that fetches it again is waste.
+2. **It works inside the constraints.** One fixed model, `docker compose up`, a Gemini key and
+   nothing else. A tool needing a second paid API is dead on the reviewer's machine.
+3. **It can be made safe and bounded.** Timeout, argument checking, no path to arbitrary code.
+4. **It can be built and tested in the time left.** A required deliverable must never be at risk
+   for an optional one.
+
 ### Tools
 
 | Tool | What it does | Why it must be a tool | Priority |
 |---|---|---|---|
 | `search_room_materials(query, top_k)` | Searches the room's uploaded files, returns text plus "deck.pptx, slide 12" | The model cannot see files we did not give it, and we cannot paste whole files into every prompt | P0 |
-| `query_study_history(from, to, subject)` | Counts rooms, turns, topics and quiz scores over a date range | Answers "what did I study last week?" from the database instead of guessing | P0 |
+| `query_study_history(from, to)` | Counts rooms, turns and concepts over a date range | Answers "what did I study last week?" from the database instead of guessing | P0 |
 | `evaluate_expression(expr)` | A calculator using sympy | Models are bad at arithmetic. Also our proof that tools cannot run arbitrary code. | P1 |
-| `get_room_timeline(limit)` | Recent turns and topics in this room | Cheap recall without sending the full history | P2 |
 
-**About `evaluate_expression` safety.** We do *not* use Python's `eval`. We parse the expression
-into a syntax tree and walk it, allowing only numbers, the basic operators, and a short list of
-functions. Anything else is rejected. No imports, no attribute access, no huge powers like
-`9**9**9`. Write this carefully — it is the most security-sensitive file in the project, and it
-is exactly the kind of thing they will ask you to defend.
+### Tools considered and rejected
+
+| Tool | Fails | Why |
+|---|---|---|
+| `get_room_timeline(limit)` | 1 | The last 6 turns are already in every prompt. This would fetch back what we just sent. Was P2; cut. |
+| **Web search** | 2 | Needs a paid key (Brave, Serper, Tavily). A reviewer with only a Gemini key gets a tool that never works. A curriculum tutor should also ground in the student's own materials, not the open web. |
+| **Code execution sandbox** | 3, 4 | The highest-value tool on any list, and the one that cannot be done safely in the time. Needs an isolated container, no network, memory and PID limits, a hard timeout, and cleanup that survives a hang. Miss one and `while True: fork()` wins. Goes in §16 and in the README's "with more time". |
+| **Wolfram Alpha** | 2 | Right idea, wrong supplier. Needs a key and costs money. sympy is a library — free, offline, deterministic. |
+| **OCR / image analysis** | 2 | Needs a vision model or OCR service. The model is fixed to `gemini-2.5-flash`. |
+| **Diagram generator** | 1 | The model can write Mermaid directly into its answer. No tool needed. |
+| **Progress / mastery tracker** | 1 | Without quiz results, "mastery" is just counting mentions. Folded into `query_study_history` as concept counts; becomes real after S6. |
+| **Text-to-speech, bash, file editor** | 1, 2 | No audio and no shell anywhere in the brief. |
+
+**Note on the rejected examples.** The brief says a room is for "a topic **such as** AP Biology or
+Grade 7 Algebra". Those are illustrations, not limits — a student can open a room about Python.
+So "we do not tutor code" is *not* a reason to skip code execution. The reasons are safety and
+time, which are honest ones.
+
+**About `evaluate_expression` safety.** It *is* code execution — just the subset that can be proved
+safe. We do *not* use Python's `eval`. We parse the expression into a syntax tree and walk it,
+allowing only numbers, the basic operators, and a short list of functions. Anything else is
+rejected: no imports, no attribute access, no huge powers like `9**9**9`. Write this carefully —
+it is the most security-sensitive file in the project, and exactly the kind of thing they will ask
+you to defend.
 
 ### Skills
 
@@ -668,11 +702,16 @@ Prepare an answer for each. The strongest answers point at a commit, a test, or 
    rows in the inspection endpoint.
 5. **How does this behave with a year of history?** Cursor paging plus the indexes. If you did P2
    item 35, quote the measured numbers.
-6. **What would you do with more time?** `room_summaries`, vector search, partitioning, OCR. Have
-   this list ready and ordered.
-7. **What did you deliberately not build, and why?** §1 answers this. Being able to answer it
+6. **What would you do with more time?** A code-execution sandbox first, then `room_summaries`,
+   vector search, partitioning, OCR. Have this list ready and ordered.
+7. **What did you deliberately not build, and why?** §16 answers this. Being able to answer it
    confidently is worth as much as any feature.
-8. **You had not used FastAPI before — what surprised you?** Answer honestly. Dependency injection
+8. **Why these tools and not others?** §8 has the four-part test and the full rejected list. Lead
+   with the test, not the list — anyone can name ten tools, few can say why they stopped at three.
+   The strongest single answer here is code execution: name it as the most valuable tool you did
+   not build, say exactly what a safe sandbox needs, and explain that `evaluate_expression` is the
+   subset you could prove safe.
+9. **You had not used FastAPI before — what surprised you?** Answer honestly. Dependency injection
    and the async rules are good, real answers.
 
 Write `docs/DECISIONS.md` as you go: what you chose, what else you considered, why, and what would
@@ -690,6 +729,8 @@ change your mind. Writing it on Saturday from memory does not work.
 | OCR for scanned PDFs | Rejecting them clearly *is* the deliberate handling they asked for. Silently saving an empty document is the real failure. |
 | Streaming replies (SSE) | Streaming would hide the repair loop, which is the interesting part. |
 | Vector / embedding search | "Fixed model" is read as applying to the chat model. Text search is enough here and needs no second model. The search code sits behind an interface so embeddings could drop in later. |
+| Code execution sandbox | The best tool we are not building, and the first thing to add with more time. `evaluate_expression` covers the subset that can be *proved* safe — an AST allow-list over expressions. Going further needs an isolated container, no network, memory and PID limits, a hard timeout, and cleanup that survives a hang. That is a service, not a function. A large probably-safe sandbox is worth less than a small provably-safe one, and would hand the reviewer a hole to poke. |
+| Web search | Needs a second paid API key. A reviewer running `docker compose up` with only a Gemini key would find a tool that never works — a broken setup instruction. A tutor should also ground in the student's own uploaded materials rather than the open web. |
 
 ---
 

@@ -500,7 +500,9 @@ Current, honest:
   wart.
 
 Planned and already decided against (with reasons in [`docs/PLAN.md` §16](docs/PLAN.md)): no web
-UI, no OCR for scanned PDFs, no streaming responses, no job queue, no vector search.
+UI, no OCR for scanned PDFs, no streaming responses, no job queue, no vector search, no web search,
+no code-execution sandbox. Tools were picked against a four-part test — the test and the full list
+of what it rejected are in [`docs/PLAN.md` §8](docs/PLAN.md).
 
 ---
 
@@ -545,7 +547,15 @@ In priority order:
 2. **Rolling room summaries.** Long rooms currently mean long context. A `room_summaries` table
    storing a summary up to turn N would make opening a 500-turn room cost the same as a 5-turn one.
    Designed in [`docs/PLAN.md` §5](docs/PLAN.md), not built.
-3. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
+3. **A real code-execution sandbox.** The highest-value tool for a study app, and the one I
+   deliberately did not build. `evaluate_expression` already runs model-written code, but only the
+   subset I can prove safe: an AST allow-list of numbers, operators and a few functions, with no
+   imports, no attribute access and no `9**9**9`. Going further — statements, loops, a real
+   interpreter — needs an isolated container with no network, memory and PID limits, a hard
+   timeout, and cleanup that survives a hang. Miss the PID limit and `while True: fork()` takes the
+   host down. That is a separate service, not a function. I would rather ship a small provably-safe
+   thing than a large probably-safe one, but with a week this is what I would build first.
+4. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
    "this scales" is a number rather than a claim.
 4. **Hybrid retrieval.** Document search is lexical (Postgres full-text). Adding embeddings behind
    the same `Retriever` interface would improve recall on paraphrased questions.
