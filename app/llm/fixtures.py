@@ -43,6 +43,12 @@ def fixture_key(request: LLMRequest) -> str:
             "model": request.model,
             "temperature": request.temperature,
             "max_output_tokens": request.max_output_tokens,
+            # Constraining the output changes what comes back, so it has to change
+            # the key. Without it a recording made before structured output was
+            # turned on would be replayed as if it were still valid.
+            "response_schema": (
+                request.response_schema.__name__ if request.response_schema else None
+            ),
             "prompt": request.prompt,
         },
         sort_keys=True,

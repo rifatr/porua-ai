@@ -8,6 +8,8 @@ the provider a single-file change.
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from pydantic import BaseModel
+
 
 class LLMError(Exception):
     """A call that did not produce a usable response.
@@ -73,6 +75,12 @@ class LLMRequest:
     model: str
     temperature: float
     max_output_tokens: int = 4096
+    # When set, the provider is asked to emit exactly this shape and nothing else.
+    # It lives on the request rather than inside the Gemini client so the transport
+    # stays ignorant of what a tutor answer is: any provider with a structured
+    # output mode can honour it, and one without it can ignore the field — which is
+    # what keeps `LLMClient` a Protocol rather than a Gemini interface.
+    response_schema: type[BaseModel] | None = None
     extra: dict = field(default_factory=dict)
 
     def as_params(self) -> dict:
@@ -85,6 +93,13 @@ class LLMRequest:
             "model": self.model,
             "temperature": self.temperature,
             "max_output_tokens": self.max_output_tokens,
+            # The class name, not the expanded schema. request_params is for a
+            # human reading the attempt back; the shape is recoverable from the
+            # name plus the code at that commit, and inlining it would bury the
+            # three fields that actually differ between attempts.
+            "response_schema": (
+                self.response_schema.__name__ if self.response_schema else None
+            ),
             **self.extra,
         }
 

@@ -345,10 +345,17 @@ exists because something reads it:
   table: concepts here are per-turn labels with no identity of their own — nothing renames or merges
   them — so a table would add a join and answer no question the index cannot.
 
-The cost is honest: asking for JSON creates the malformed-output problem in the first place. Gemini's
-own `response_schema` would remove most parse failures, and in production I would use it. I did not
-here for two reasons — it is provider-specific, and it does nothing about the content layer, which
-is the half the brief actually cares about.
+The cost is honest: asking for JSON creates the malformed-output problem in the first place. So the
+request also carries a `response_schema`, and Gemini is constrained to emit that shape and nothing
+else. This was a reversal — it was left out at first as provider-specific — and a real failure
+changed it: the model answered in prose, began restating the whole answer as JSON, and ran out of
+budget partway through the restatement. Constrained decoding makes that draft impossible rather
+than merely discouraged.
+
+Two things kept it honest. The schema is a field on `LLMRequest`, not something the Gemini client
+knows about, so a provider without structured output ignores it and `LLMClient` stays a Protocol.
+And it does nothing whatever for the content layer, which is the half the brief actually cares
+about — so every check below still runs on output the provider has already guaranteed the shape of.
 
 ### Every model attempt is a database row, not a log line
 
@@ -493,6 +500,13 @@ Current, honest:
 - **No authentication.** The brief excludes a login flow. `X-Student-Id` is trusted as sent, so
   anyone can act as any student by changing a header. Identity is modelled properly, so adding real
   auth means replacing one dependency rather than reshaping the schema.
+- **A truncated reply is misread as a content failure.** `gemini-2.5-flash` bills thinking
+  against `max_output_tokens`, so the two share one allowance and a question needing a lot of
+  reasoning can run out of room mid-JSON. The parse layer sees an unclosed brace, calls it
+  `JSON_TRUNCATED` and sends it to the repair loop — which cannot fix a budget problem, so both
+  repairs are spent reproducing it. `finish_reason` is stored on every attempt but nothing
+  branches on it yet. The fix is below, under [what I would do with more
+  time](#what-i-would-do-with-more-time).
 - **No rate limiting** on any endpoint.
 - **Migrations are not run automatically** on startup — one explicit command after `up`.
 - **`pip install -e .` in the Dockerfile runs before the source is copied**, so it installs
@@ -544,10 +558,25 @@ that was never dropped on downgrade, and a column type that had diverged from it
 In priority order:
 
 1. **Finish S4–S7.** Tools, documents, skills and study history.
-2. **Rolling room summaries.** Long rooms currently mean long context. A `room_summaries` table
+2. **Give thinking its own budget, and route `MAX_TOKENS` to the retry path.** Thinking is billed
+   against `max_output_tokens` on `gemini-2.5-flash`, so one allowance covers both. A multi-step
+   question can spend 1,300–2,000 tokens reasoning and leave too little to write with — one
+   observed turn spent three attempts and 8,679 tokens failing to deliver an answer it had got
+   right on the first one. Raising the ceiling to 4,096 buys headroom, but it is a stopgap: the
+   split between thinking and answering is still unmanaged, so a harder question moves the same
+   failure rather than removing it. Two structural changes are outstanding. Set
+   `thinking_config.thinking_budget`, so the visible answer is *guaranteed* room instead of
+   getting whatever reasoning leaves behind. And check `finish_reason` before validating, so a
+   truncated reply retries with a larger budget rather than entering the repair loop — which
+   argues with the model about answer length, a thing that is neither the cause nor within its
+   power to fix. `EmptyResponse` already takes the retry path for this exact root cause; today
+   truncation is the same bug arriving through the one door that cannot handle it. Sizing the
+   budget properly is a measurement rather than a guess, and wants a spread of real questions
+   behind it — which is why it is here and not done.
+3. **Rolling room summaries.** Long rooms currently mean long context. A `room_summaries` table
    storing a summary up to turn N would make opening a 500-turn room cost the same as a 5-turn one.
    Designed in [`docs/PLAN.md` §5](docs/PLAN.md), not built.
-3. **A real code-execution sandbox.** The highest-value tool for a study app, and the one I
+4. **A real code-execution sandbox.** The highest-value tool for a study app, and the one I
    deliberately did not build. `evaluate_expression` already runs model-written code, but only the
    subset I can prove safe: an AST allow-list of numbers, operators and a few functions, with no
    imports, no attribute access and no `9**9**9`. Going further — statements, loops, a real
@@ -555,13 +584,13 @@ In priority order:
    timeout, and cleanup that survives a hang. Miss the PID limit and `while True: fork()` takes the
    host down. That is a separate service, not a function. I would rather ship a small provably-safe
    thing than a large probably-safe one, but with a week this is what I would build first.
-4. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
+5. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
    "this scales" is a number rather than a claim.
-4. **Hybrid retrieval.** Document search is lexical (Postgres full-text). Adding embeddings behind
+6. **Hybrid retrieval.** Document search is lexical (Postgres full-text). Adding embeddings behind
    the same `Retriever` interface would improve recall on paraphrased questions.
-5. **Monthly partitioning** of `turn_attempts` and `messages`, the two tables that grow without
+7. **Monthly partitioning** of `turn_attempts` and `messages`, the two tables that grow without
    bound, and a retention job for the large `raw_response` payloads.
-6. **Real auth**, replacing the `X-Student-Id` header.
+8. **Real auth**, replacing the `X-Student-Id` header.
 
 ---
 

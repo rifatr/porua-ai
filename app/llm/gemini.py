@@ -35,6 +35,18 @@ class GeminiClient:
             max_output_tokens=request.max_output_tokens,
         )
 
+        if request.response_schema is not None:
+            # Constrained decoding. The provider will only emit tokens that fit the
+            # schema, which makes one specific failure impossible rather than
+            # merely discouraged: answering in prose first and then restating the
+            # whole thing as JSON. That draft used to cost half the output budget
+            # and leave the real object truncated; now it has nowhere to go.
+            #
+            # Both fields are set together on purpose — a schema without the mime
+            # type is silently ignored, which would look like this working.
+            config.response_mime_type = "application/json"
+            config.response_schema = request.response_schema
+
         try:
             response = await self._client.aio.models.generate_content(
                 model=request.model,

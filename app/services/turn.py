@@ -53,6 +53,7 @@ from app.models.turn_attempt import AttemptPurpose, TurnAttempt
 from app.prompts.loader import Prompt, load_prompt
 from app.reliability.failures import ResponseInvalid
 from app.reliability.pipeline import validate_tutor_response
+from app.schemas.tutor import TutorAnswer
 from app.services import room as room_service
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,12 @@ async def create_turn(
             prompt=rendered,
             model=settings.gemini_model,
             temperature=prompt.temperature,
+            # Both the tutor prompt and the repair prompt ask for this same shape,
+            # so both calls are constrained by it. The parse and schema layers still
+            # run: a provider is free to ignore the field, and constrained decoding
+            # says nothing about whether the answer is any *good*, which is the half
+            # of the pipeline that matters most.
+            response_schema=TutorAnswer,
         )
         attempt = TurnAttempt(
             turn_id=turn.id,
