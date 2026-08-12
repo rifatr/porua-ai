@@ -1,0 +1,13 @@
+{
+  "answer": "Start by getting the x term on its own.
+
+Subtract 6 from both sides:
+3x + 6 - 6 = 15 - 6, which leaves 3x = 9.
+
+Now divide both sides by 3:
+x = 3.
+
+Check it by putting 3 back in: 3 times 3 is 9, plus 6 is 15. That matches, so it is right.",
+  "in_scope": true,
+  "concepts": ["inverse operations", "checking a solution"]
+}

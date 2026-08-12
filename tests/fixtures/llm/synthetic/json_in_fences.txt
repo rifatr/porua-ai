@@ -1,0 +1,7 @@
+```json
+{
+  "answer": "Subtract 6 from both sides to get 3x = 9, then divide both sides by 3 to get x = 3.",
+  "in_scope": true,
+  "concepts": ["inverse operations", "linear equations"]
+}
+```

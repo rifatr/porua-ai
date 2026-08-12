@@ -18,6 +18,11 @@ from sqlalchemy.pool import NullPool
 
 # Tests must never call the real Gemini API.
 os.environ.setdefault("LLM_FIXTURE_MODE", "replay")
+# The retry loop is real, and so is its backoff. Left at the production 0.5s, a
+# handful of retry tests would add several seconds of pure sleeping to every run.
+# Set to zero the loop still runs exactly as it does in production — it just does
+# not wait, so the tests measure the logic rather than the clock.
+os.environ.setdefault("RETRY_BASE_DELAY_SECONDS", "0")
 
 from app.api.deps import get_llm  # noqa: E402
 from app.config import get_settings  # noqa: E402

@@ -1,0 +1,7 @@
+[
+  {
+    "answer": "Subtract 6 from both sides, then divide by 3.",
+    "in_scope": true,
+    "concepts": ["inverse operations"]
+  }
+]

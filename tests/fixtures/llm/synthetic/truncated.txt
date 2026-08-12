@@ -1,0 +1,1 @@
+{"answer": "Start by getting the term with x on its own. Subtract 6 from both sides, which leaves 3x = 9. Now divide both sides by 3, and you
