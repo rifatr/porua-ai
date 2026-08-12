@@ -99,6 +99,24 @@ async def test_earlier_turns_are_replayed_into_the_next_prompt(
     assert "Subtract 6 from both sides" in second_prompt
 
 
+async def test_earlier_turns_are_replayed_oldest_first(
+    client: AsyncClient, auth: dict[str, str], fake_llm: FakeLLM
+) -> None:
+    """The block renders as a transcript, so the order is not cosmetic.
+
+    Newest-first would put "Why subtract 6 first?" above the answer that subtracted
+    6 — every follow-up, pronoun and "that" would point at something not yet said.
+    The query selects newest-first to get the right six turns, then reverses them;
+    this is what stops that reverse being deleted as redundant.
+    """
+    room_id = await make_room(client, auth)
+    for message in ("oldest question", "middle question", "newest question"):
+        await client.post(f"/rooms/{room_id}/turns", json={"message": message}, headers=auth)
+
+    prompt = fake_llm.last_prompt
+    assert prompt.index("oldest question") < prompt.index("middle question")
+
+
 async def test_the_first_prompt_has_no_earlier_conversation_block(
     client: AsyncClient, auth: dict[str, str], fake_llm: FakeLLM
 ) -> None:
@@ -189,7 +207,7 @@ async def test_inspection_shows_the_prompt_its_version_and_checksum(
     assert len(detail["attempts"]) == 1
     attempt = detail["attempts"][0]
     assert attempt["prompt_name"] == "tutor_system"
-    assert attempt["prompt_version"] == 1
+    assert attempt["prompt_version"] == 2
     assert len(attempt["prompt_sha256"]) == 64
     assert "hi" in attempt["rendered_prompt"]
     assert attempt["request_params"]["model"]
@@ -227,11 +245,14 @@ async def test_a_failed_attempt_is_still_recorded(
 
     detail = (await client.get(f"/turns/{turn_id}", headers=auth)).json()
 
-    assert len(detail["attempts"]) == 1
-    attempt = detail["attempts"][0]
-    assert attempt["error_type"] == "PROVIDER_UNAVAILABLE"
-    assert attempt["raw_response"] is None
-    assert attempt["rendered_prompt"], "we must still know what we sent"
+    # Three, not one: from S3 a provider error is retried twice before the turn
+    # gives up, and each of those calls is a recorded attempt in its own right.
+    # See tests/test_reliability.py for the retry behaviour itself.
+    assert len(detail["attempts"]) == 3
+    for attempt in detail["attempts"]:
+        assert attempt["error_type"] == "PROVIDER_UNAVAILABLE"
+        assert attempt["raw_response"] is None
+        assert attempt["rendered_prompt"], "we must still know what we sent"
 
 
 async def test_another_students_turn_is_not_found(
