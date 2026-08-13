@@ -237,14 +237,13 @@ async def _run_tool(
     def finish(
         status: ToolStatus, *, result: dict | None = None, error: str | None = None
     ) -> ToolResult:
-        """Complete the row, then add it. Both halves matter.
+        """Complete the row, then add it. The order matters.
 
-        The row is added here rather than up front because a tool may query the
-        database, and SQLAlchemy autoflushes pending objects before a query. An
-        unfinished row flushed mid-call has status `ok` and no result yet, which
-        violates `tool_calls_explain_themselves` — the constraint found this the
-        first time `query_study_history` ran. Adding a complete row instead means
-        there is never a half-written one to flush.
+        A tool may query the database, and SQLAlchemy autoflushes pending objects
+        before a query. A row added before the tool runs would be flushed
+        half-written — status `ok`, no result yet — which violates the
+        `tool_calls_explain_themselves` constraint. Adding it complete means there
+        is never a partial row for a flush to catch.
 
         This is the opposite of `turn_attempts`, which *is* written before its
         call. The difference is what a crash would cost: an attempt holds the

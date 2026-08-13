@@ -51,12 +51,11 @@ class ToolStatus(enum.StrEnum):
     """How a tool call ended.
 
     Defined here, with the table that stores it, rather than in `app/tools/`.
-    A tool needs to know about the database — `query_study_history` queries it — so
-    `tools` depending on `models` is the right direction. The reverse is not, and
-    having this enum in `tools/base.py` made `models/tool_call.py` import back into
-    `tools`, which was a genuine import cycle. It only ever worked because the
-    application happens to import `app.models` first; importing
-    `app.tools.calculator` on its own raised ImportError.
+
+    Dependencies run one way: `tools` may import `models`, because a tool needs the
+    database — `query_study_history` queries it. `models` must not import `tools`.
+    Keeping this enum here is what holds that line; defining it in `tools/base.py`
+    would force this module to import back into `tools` and close a cycle.
     """
 
     OK = "ok"

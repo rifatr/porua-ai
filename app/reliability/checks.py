@@ -1,9 +1,7 @@
 """Fixing what code can fix, then rejecting only what it cannot.
 
 The brief names this problem directly — "structurally valid but poor content" —
-and it is the half schema validation cannot reach. But the obvious response, a
-long list of rules that each trigger a repair, is wrong, and this module was
-written that way first.
+and it is the half schema validation cannot reach.
 
 ## Why there are only three checks
 
@@ -17,16 +15,16 @@ Duplicate tags, blank strings, tags on a turn that taught nothing — every one 
 those is a string operation. Asking a language model to perform it, and paying for
 the privilege, is indefensible. `tidy()` does them below, for free.
 
-Four more rules were written and then deleted, because they defended nobody:
+Rules that belong to neither list, and are therefore absent:
 
-- *no "Great question!" opening* — pure taste, and the prefix match rejected
-  "Absolutely convergent series…", a correct sentence in a maths room;
-- *no `#` headings* — pure taste, and demoting one is a one-line rewrite;
-- *at most 4 concepts* — nine tags instead of four harms nothing;
-- *no concept longer than 60 characters* — barely harms anything.
+- *no "Great question!" opening* — taste, not correctness. A prefix match also
+  catches "Absolutely convergent series…", which is a correct sentence.
+- *no `#` headings* — taste, and demoting a heading is a one-line rewrite.
+- *at most 4 concepts* — nine tags instead of four harms nobody.
+- *no concept longer than 60 characters* — barely harms anybody.
 
-What survives protects the student or the data. The rest was opinion with a bill
-attached.
+A check earns its place by protecting the student or the data. Anything else is
+an opinion with a bill attached.
 
 ## Why the word limit is so much higher than the prompt's
 
