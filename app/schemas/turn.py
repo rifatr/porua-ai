@@ -77,6 +77,37 @@ class TurnRead(BaseModel):
     # Timing belongs to the inspection view; see TurnDetail.
 
 
+class ToolCallRead(BaseModel):
+    """One tool the model asked for, whether or not it ran.
+
+    Rejected calls appear here too, and they are the more interesting rows: an
+    `unknown_tool` is the fixed registry refusing a name we never wrote, and an
+    `invalid_arguments` is the argument check refusing model output. Showing only
+    successful calls would hide the protections working.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    call_no: int
+    tool_name: str
+    arguments: dict = Field(
+        description="Exactly what the model asked for, before validation."
+    )
+    result: dict | None = Field(
+        default=None, description="What was sent back. Null if the call never ran."
+    )
+    status: str = Field(
+        description=(
+            "ok, unknown_tool, invalid_arguments, failed, or timed_out."
+        )
+    )
+    error_detail: str | None = None
+    duration_ms: int | None = Field(
+        default=None,
+        description="How long this tool took. Compare with the attempt's own time.",
+    )
+
+
 class AttemptRead(BaseModel):
     """One call to the model, successful or not."""
 
@@ -128,6 +159,10 @@ class AttemptRead(BaseModel):
             "How long this single call took. Compare with the turn's duration to "
             "separate model time from our own."
         ),
+    )
+    tool_calls: list[ToolCallRead] = Field(
+        default_factory=list,
+        description="Tools this particular call asked for, in the order requested.",
     )
 
 
