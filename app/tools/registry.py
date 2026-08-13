@@ -34,6 +34,7 @@ from pydantic import BaseModel, ValidationError
 from app.llm.base import ToolSpec
 from app.tools.base import Tool
 from app.tools.calculator import CalculatorTool
+from app.tools.search_materials import SearchMaterialsTool
 from app.tools.study_history import StudyHistoryTool
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class InvalidArguments(Exception):
 
 def _build() -> dict[str, Tool]:
     tools: dict[str, Tool] = {}
-    for tool_class in (StudyHistoryTool, CalculatorTool):
+    for tool_class in (SearchMaterialsTool, StudyHistoryTool, CalculatorTool):
         instance = tool_class()
         if instance.name in tools:  # pragma: no cover - guards a typo at import
             raise RuntimeError(f"Two tools are both called {instance.name!r}")
@@ -57,7 +58,7 @@ def _build() -> dict[str, Tool]:
     return tools
 
 
-#: Built once at import. Tools are stateless, so one instance each is enough.
+# Built once at import. Tools are stateless, so one instance each is enough.
 _TOOLS: dict[str, Tool] = _build()
 
 
