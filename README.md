@@ -22,7 +22,7 @@ and tests, rather than a layer at a time. The reasoning is in
 | **S2** Turns | Talk to Gemini, record every attempt, inspect a turn | ✅ Done |
 | **S3** Reliability | Parse → schema → content checks → repair loop, with retries | ✅ Done |
 | **S4** Tools | Tool registry with hard limits, study-history and calculator tools | ✅ Done |
-| **S5** Documents | Upload and extract `.docx` / `.pdf` / `.pptx`, search over them | ⬜ Not started |
+| **S5** Documents | Upload and extract `.docx` / `.pdf` / `.pptx`, full-text search over them | ✅ Done |
 | **S6** Skills | Quiz builder and step-by-step maths solver, both verified in code | ⬜ Not started |
 | **S7** History | Study history over a date range | ✅ Done — pulled into S4 |
 
@@ -87,10 +87,25 @@ curl -s -X POST "localhost:8000/rooms/$ROOM_ID/turns" \
   -d '{"message":"How do I solve 3x + 6 = 15?"}' | jq
 
 # 5. Inspect that turn in full: the prompt sent, its version and checksum, every
-#    model attempt including failures, and token usage.
+#    model attempt including failures, tool calls, and token usage.
 curl -s "localhost:8000/turns/$TURN_ID" -H "X-Student-Id: $SID" | jq
 
-# 6. Delete a room, twice. Both return 204 — it is idempotent — and the row survives.
+# 6. Upload a handout. Read, chunked and indexed before this returns, so a 201
+#    means the tutor can already search it.
+curl -s -X POST "localhost:8000/rooms/$ROOM_ID/documents" \
+  -H "X-Student-Id: $SID" -F "file=@algebra-handout.pdf" | jq
+
+# 7. Upload something that is not really a PDF. 415, with a code you can branch on.
+echo "not a pdf" > fake.pdf
+curl -s -X POST "localhost:8000/rooms/$ROOM_ID/documents" \
+  -H "X-Student-Id: $SID" -F "file=@fake.pdf" | jq '{status, code, detail}'
+
+# 8. Now ask something the handout covers. The tutor searches it and cites the page.
+curl -s -X POST "localhost:8000/rooms/$ROOM_ID/turns" \
+  -H 'Content-Type: application/json' -H "X-Student-Id: $SID" \
+  -d '{"message":"What method does my handout use for simultaneous equations?"}' | jq
+
+# 9. Delete a room, twice. Both return 204 — it is idempotent — and the row survives.
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "localhost:8000/rooms/$ROOM_ID" -H "X-Student-Id: $SID"
 curl -s "localhost:8000/rooms/$ROOM_ID" -H "X-Student-Id: $SID" | jq .archived_at
 ```
@@ -103,6 +118,10 @@ Step 5 is the one worth looking at. A real turn against `gemini-2.5-flash` repor
 
 Thinking cost four times the visible answer. It is billed and never appears in the reply, which is
 why it is counted separately rather than folded into `output`.
+
+Step 8 is the other one worth looking at. Inspect that turn and the `tool_calls` array shows what
+the model asked for and what came back — including the finished citation string it was handed, so
+you can see that "lecture-3.pptx, page 4" was given to it rather than composed by it.
 
 ---
 
@@ -142,7 +161,7 @@ Every command works either way. Inside Docker, prefix with `docker compose exec 
 ### Tests
 
 ```bash
-pytest                       # all 179
+pytest                       # all 221
 pytest -q                    # quiet
 pytest tests/test_turns.py   # one file
 pytest -k "cursor"           # by name
@@ -288,6 +307,7 @@ app/
     deps.py         FastAPI dependencies — the only place identity enters
     routes/         HTTP layer: thin, no business logic
   db/               engine, session, declarative base + naming convention
+  documents/        reading uploads: detect → extract → chunk. No database, no I/O
   llm/              the provider boundary: one Protocol, a Gemini client, record/replay
   reliability/      parse → schema → content. Pure functions, no I/O, no database
   tools/            what the model may ask for; the fixed registry
@@ -308,6 +328,12 @@ decision about the turn, because it costs money and writes a row, so it lives in
 
 `models/` and `schemas/` are kept apart on purpose: the API contract should not shift every time a
 column is added, and internal columns should never be exposed by accident.
+
+`documents/` follows the same rule as `reliability/`: three modules that take bytes and return
+data, with no session and no network. That is what lets the file tests run against real PDFs,
+Word files and slide decks without a database — `tests/documents.py` builds each fixture in
+memory, so what makes a file "a scan" or "corrupt" is visible in the code rather than hidden in a
+committed binary.
 
 ---
 
@@ -378,6 +404,105 @@ The consequence is the interesting part: **constrained decoding is unavailable e
 model can call tools.** During a tool-using turn the parse → schema → content pipeline is the only
 thing between model output and the student. `response_schema` did not make that pipeline redundant;
 it narrowed it to where it is the sole defence.
+
+### A bad upload is an HTTP status, not a status field
+
+Uploads are read, chunked and indexed inside the request, and the reason is the brief's own
+requirement to handle bad input deliberately.
+
+Extraction is where most bad files are *discovered*. A password-protected PDF, a scan with no text
+layer, a `.pptx` renamed to `.docx` — none of these can be detected from the first four bytes; you
+find out when a parser tries. Do that work in a background task and every one of them becomes a
+status column the client polls and then has to interpret. Do it in the request and each is an HTTP
+status with a stable code:
+
+| Status | `code` | Cause |
+|---|---|---|
+| 415 | `UNSUPPORTED_TYPE` | Not a supported type, or the contents disagree with the name |
+| 413 | `FILE_TOO_LARGE` | Over 20 MB |
+| 422 | `CORRUPT_ARCHIVE` | Damaged, or not really the format it claims |
+| 422 | `ENCRYPTED` | Password-protected |
+| 422 | `NO_TEXT_LAYER` | A scan — images of text, which we do not OCR |
+| 422 | `UNDECODABLE_TEXT` | Fonts carry no character map; the "text" is glyph numbers |
+| 422 | `EMPTY_EXTRACTION` | Opens fine, contains no words |
+
+The last three are the group worth arguing about. None of them yields usable text, and it would be
+easy to collapse them into one error. They are kept apart because the student's next action
+differs: a scan needs OCR we do not do, an undecodable file needs re-exporting from the original,
+and an empty one never had anything in it. And each is **rejected** rather than stored — an
+accepted scan sits in the room looking searchable, matches nothing, and gives no clue why.
+
+`UNDECODABLE_TEXT` was found by uploading a real 700 KB PDF, which returned a 500. Some PDFs embed
+fonts without a `ToUnicode` map, so there is no way back from a glyph to a character and the
+extractor returns raw font indices: `\x00\x02\x01\x04\x03`. Those bytes then hit Postgres, which
+cannot store `\x00` in a `text` column at all. Two fixes, not one — everything extracted is now
+stripped of characters that cannot survive the database, *and* a document that is mostly such
+characters is refused rather than indexed as noise.
+
+The file was a 148-page competitive-programming book built by old LaTeX, using **98 Type 3 fonts**.
+A Type 3 glyph is a small drawing program, so the file contains pictures of letters rather than
+letters. It scored 0.416 across the document, its only pages under the threshold were blank, and
+`text`, `blocks` and `words` extraction all returned the same indices — there is no fallback,
+because there is nothing there. Rejecting it is the correct answer; reading it would need OCR.
+
+`scripts/check_document.py` runs exactly this pipeline against a file and prints what would
+happen, which is worth doing before a demo rather than during one:
+
+```bash
+docker compose exec -T api python scripts/check_document.py /tmp/handout.pdf
+```
+
+The stripping has a trap worth knowing about. The obvious implementation is "drop every character
+in Unicode category `C`", and it is wrong here: category `Cf` holds the zero-width joiner, which
+Bangla, Hindi and Arabic need to render correctly. `র‍্য` and `র্য` are different words. Only `Cc`
+and `Cs` are dropped, and a test asserts the joiner survives.
+
+The file type is decided from the first four bytes as well as the extension, so a `.txt` renamed
+to `.pdf` never reaches a parser. That check has a real limit, stated rather than glossed over:
+`.docx` and `.pptx` are both ZIP archives, so the signature proves the file is a ZIP and cannot
+prove which Office format it holds. A PowerPoint named `.docx` is caught one step later, by the
+extractor, as `CORRUPT_ARCHIVE`. `tests/test_documents.py` covers every row above.
+
+### Chunks never span a page, so a citation is always true
+
+Each chunk carries the page it came from, and that is what the tutor cites: *"your slides put it
+this way (lecture-3.pptx, page 4)"*. A chunk spanning pages 3 and 4 could only claim one of them,
+so half its text would be cited to the wrong place. Pages are therefore chunked independently even
+when that leaves a short one.
+
+Chunks overlap by 40 of their 250 words. A boundary landing mid-explanation would leave neither
+side making sense; overlapping means any short passage survives whole in at least one chunk. The
+cost is about 15% more rows.
+
+The `tsvector` is a **generated column** — Postgres maintains it from `text`, so there is no code
+path that updates one without the other, because there is no code path that updates it at all.
+
+### Search tries for all the words, then any of them
+
+`websearch_to_tsquery` is used rather than `to_tsquery`, because the search string comes from a
+language model: `to_tsquery` demands operator syntax and raises on anything else, which would make
+`photosynthesis and light` a 500. But it joins terms with **AND**, and that turned out to be the
+bug that made the whole feature look broken in a real room:
+
+```
+'protections prevent arbitrary tool calls'
+  -> 'protect' & 'prevent' & 'arbitrari' & 'tool' & 'call'
+```
+
+The uploaded document said "protections" and "arbitrary" and never said "prevent". One ordinary
+English word the model chose reduced five good matches to zero. The tutor then read that silence
+as "your materials do not cover this" and answered from general knowledge — fluently, plausibly,
+and without the handout it was holding. Nothing errored. The only visible symptom was a vague
+answer.
+
+So search runs strict first and falls back to matching any term, ranked. Precision when the words
+really are all there, recall when they are not. The cost is that a broad pass can return passages
+that merely share a word, which no rank threshold fixes honestly — measured on real data, a good
+query's average rank and a nonsense query's best rank overlap, so any fixed cut-off would be a
+magic number tuned to one document. Relevance is therefore judged where the meaning is understood
+rather than where the words are counted: `tutor_system` v5 tells the model to read each passage,
+use it only if it answers the question, and say the material does not cover it otherwise. A forced
+citation the student can look up and not find is worse than no citation.
 
 ### Nothing unchecked reaches the student
 
@@ -584,7 +709,25 @@ The scheme, since the brief asks for prompts to be *"readable and versioned"*:
 
 Current, honest:
 
-- **S0 to S4 are built, plus S7.** No documents (S5) or skills (S6) yet.
+- **S0 to S5 are built, plus S7.** No skills (S6) yet.
+- **Document processing is synchronous.** Measured: a text-heavy PDF parses at roughly 1.5 MB per
+  second, so 4.4 MB takes ~3 s and a 20 MB worst case around 14 s. The caller waits that long. The
+  trade is deliberate — extraction is where most bad files are *discovered*, and doing it in the
+  request means an encrypted PDF is a `422 ENCRYPTED` rather than a status the client has to poll
+  for. Parsing runs in a worker thread (`asyncio.to_thread`), so it is only the *uploader* who
+  waits; the event loop keeps serving everyone else. At 500 MB the whole trade would flip, and
+  `app/services/document.py` says what would change.
+- **Word files get no page numbers.** A `.docx` does not contain them — page breaks are computed by
+  whatever renders the file. So a citation from a Word document names the file and stops there.
+  Inventing a number would be worse than omitting one.
+- **`python-docx` cannot see headers, footers or text boxes**, and PowerPoint SmartArt is a drawing
+  rather than text. Content there is lost silently, because the libraries give us no way to know it
+  existed. Two-column PDFs can also come out interleaved.
+- **Search is full-text, not semantic.** Postgres `tsvector` matches words and their stems, so a
+  student asking about "photosynthesis" finds "photosynthesis"; asking about "how plants eat" finds
+  nothing. Embeddings are the fix and would need a second model — see §16 of the plan.
+- **The original file is not kept.** We store its SHA-256, name, size and extracted text. Nothing
+  reads the bytes back, so keeping them would mean a volume or object store with no reader.
 - **The tool timeout cannot interrupt CPU-bound work.** `asyncio.wait_for` cancels at an
   `await`, and `evaluate_expression` is synchronous. Its real protection is the size limits on
   exponents, factorials and expression length, not the 8-second timeout.
@@ -593,6 +736,18 @@ Current, honest:
   carrying on. Deliberate, and the reason is in `app/services/turn.py`.
 - **Room context is the last 6 in-scope turns**, not a summary. Long rooms therefore mean long
   prompts. The fix is a `room_summaries` table; it is designed, not built.
+- **An earlier answer in the room can stop the tutor searching.** Found by testing, not by
+  guessing. If a question was already answered badly — in a room where the materials tool was not
+  yet reaching the documents — that answer sits in the conversation context, and asking the same
+  question again makes the model recap itself rather than look anything up: *"we just talked about
+  this"*. Its own earlier guess has become a source. Verified precisely: the same question in a
+  fresh room with the same file searches and answers correctly, and a **new** question in the
+  contaminated room also searches correctly, so it is not that history suppresses tool use in
+  general — only that a repeated question is answered from the transcript. `tutor_system` v5 tells
+  the model to search before claiming it has covered something, which helps and does not fully
+  win against three prior answers. The real fix is to stop treating past answers as equal in
+  standing to retrieved material: mark stored turns with whether they were grounded in a document,
+  and drop ungrounded ones from context when the same topic comes round again.
 - **`tests/fixtures/llm/recorded/` is empty.** A fixture is keyed by the exact request, prompt text
   included, so moving to `tutor_system` v2 made the four recordings taken against v1 unreachable
   rather than merely stale. Re-record with one command — see [Recording Gemini
@@ -621,8 +776,8 @@ Current, honest:
   wart.
 
 Planned and already decided against (with reasons in [`docs/PLAN.md` §16](docs/PLAN.md)): no web
-UI, no OCR for scanned PDFs, no streaming responses, no job queue, no vector search, no web search,
-no code-execution sandbox. Tools were picked against a four-part test — the test and the full list
+UI, no OCR for scanned or undecodable PDFs, no formats beyond the three the brief names, no
+streaming responses, no job queue, no vector search, no web search, no code-execution sandbox. Tools were picked against a four-part test — the test and the full list
 of what it rejected are in [`docs/PLAN.md` §8](docs/PLAN.md).
 
 ---
@@ -691,13 +846,43 @@ In priority order:
    timeout, and cleanup that survives a hang. Miss the PID limit and `while True: fork()` takes the
    host down. That is a separate service, not a function. I would rather ship a small provably-safe
    thing than a large probably-safe one, but with a week this is what I would build first.
-5. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
+5. **Read every document a student actually owns.** Today six kinds of file are rejected with a
+   clear reason, which is honest but is still a student who cannot use the product. There are two
+   separate gaps and they need different work.
+
+   *Content we can see but cannot read* — scanned handouts (`NO_TEXT_LAYER`) and PDFs whose fonts
+   record shapes rather than characters (`UNDECODABLE_TEXT`). Both are pictures of text, so both
+   need OCR, and the same code path serves them: render each page with PyMuPDF, read the image,
+   store the result as chunks exactly as now. Three ways to do the reading:
+
+   | | Quality on maths and Bangla | Cost | New dependency |
+   |---|---|---|---|
+   | **Tesseract** | Weak. Formulas are hopeless; the Bangla pack is mediocre | Free | A binary and language packs, ~100 MB in the image |
+   | **Gemini vision** | Strong. Reads formulas and layout, and Bangla well | ~1k tokens per page, one-off at upload | **None** — same model, same key |
+   | **Cloud OCR** (Document AI, Textract) | Strongest | Per page, billed | Another key and account |
+
+   I would use **Gemini vision**. The brief fixes the model and we already hold the key, so it adds
+   no service, no image weight and no second vendor — and for a product serving Bangla and school
+   maths it is the only one of the three that is actually good at both. A 148-page book is a
+   one-off ~150k tokens, paid once at upload rather than per turn, which is the same economics as
+   the text path today. The honest catch is latency: OCR is far slower than parsing, so this is the
+   change that finally forces upload into a background job with a status column — the trade-off
+   `app/services/document.py` already names as the point where synchronous processing stops paying.
+
+   *Formats we do not accept at all* — `.doc` (the old binary Word format, which needs a converter,
+   not a parser), `.odt`, `.rtf`, `.txt`, `.md`, `.epub`. And inside formats we do accept:
+   `python-docx` cannot reach headers, footers or text boxes, PowerPoint SmartArt is a drawing, and
+   a two-column PDF can come out interleaved. None of these need OCR. They need more extractors
+   behind the same `Page` interface, which is why extraction was built as one function per format
+   returning a shared shape.
+
+6. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
    "this scales" is a number rather than a claim.
-6. **Hybrid retrieval.** Document search is lexical (Postgres full-text). Adding embeddings behind
+7. **Hybrid retrieval.** Document search is lexical (Postgres full-text). Adding embeddings behind
    the same `Retriever` interface would improve recall on paraphrased questions.
-7. **Monthly partitioning** of `turn_attempts` and `messages`, the two tables that grow without
+8. **Monthly partitioning** of `turn_attempts` and `messages`, the two tables that grow without
    bound, and a retention job for the large `raw_response` payloads.
-8. **Real auth**, replacing the `X-Student-Id` header.
+9. **Real auth**, replacing the `X-Student-Id` header.
 
 ---
 
