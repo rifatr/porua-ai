@@ -13,7 +13,7 @@ from fastapi import APIRouter, File, Response, UploadFile, status
 from app.api.deps import CurrentStudent, DbSession
 from app.config import get_settings
 from app.documents.detect import supported_extensions
-from app.schemas.document import DocumentRead
+from app.schemas.document import DocumentRead, DocumentUploadRead
 from app.services import document as document_service
 
 rooms_router = APIRouter(prefix="/rooms", tags=["documents"])
@@ -24,7 +24,7 @@ _EXTENSIONS = ", ".join(f"`{extension}`" for extension in supported_extensions()
 
 @rooms_router.post(
     "/{room_id}/documents",
-    response_model=DocumentRead,
+    response_model=DocumentUploadRead,
     status_code=status.HTTP_201_CREATED,
     summary="Upload study material",
     description=(
@@ -37,6 +37,10 @@ _EXTENSIONS = ", ".join(f"`{extension}`" for extension in supported_extensions()
         "Uploading the same file twice returns the document that already exists "
         "rather than indexing it again — the SHA-256 of the contents is its "
         "identity.\n\n"
+        f"A room keeps **{document_service.MAX_DOCUMENTS_PER_ROOM} files**. "
+        "Uploading past that is not refused — the oldest is removed instead, and "
+        "named in `evicted`, so a student mid-study is never blocked by a file "
+        "they added last term.\n\n"
         "**Failures**\n\n"
         "| Status | `code` | Meaning |\n"
         "|---|---|---|\n"
@@ -54,7 +58,7 @@ async def upload_document(
     room_id: UUID,
     db: DbSession,
     student: CurrentStudent,
-    file: Annotated[UploadFile, File(description="The document to index.")],
+    file: Annotated[UploadFile, File(description="The document to index. Supported file types: pdf, pptx and docx.")],
 ) -> DocumentRead:
     # Read at most one byte past the limit. The body has already been received by
     # this point — bounding it for real needs a limit on the server or proxy in
@@ -62,14 +66,17 @@ async def upload_document(
     # we work out that we are going to reject it.
     data = await file.read(get_settings().max_upload_bytes + 1)
 
-    document = await document_service.create_document(
+    result = await document_service.create_document(
         db,
         student,
         room_id,
         filename=file.filename or "",
         data=data,
     )
-    return DocumentRead.model_validate(document)
+    return DocumentUploadRead(
+        **DocumentRead.model_validate(result.document).model_dump(),
+        evicted=result.evicted,
+    )
 
 
 @rooms_router.get(
