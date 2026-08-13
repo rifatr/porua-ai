@@ -91,7 +91,12 @@ from app.tools.registry import InvalidArguments
 logger = logging.getLogger(__name__)
 
 TUTOR_PROMPT = "tutor_system"
-TUTOR_PROMPT_VERSION = 3
+# Pinned, not resolved from disk. A prompt is a behavioural change, so moving to
+# a new one should be a commit someone reviewed, not a side effect of a file
+# appearing. The cost of pinning is that adding a version and forgetting this line
+# leaves the new prompt inert — which happened once, in S5, and is why
+# `tests/test_prompts.py` now asserts these constants are the newest on disk.
+TUTOR_PROMPT_VERSION = 5
 REPAIR_PROMPT = "tutor_repair"
 REPAIR_PROMPT_VERSION = 1
 

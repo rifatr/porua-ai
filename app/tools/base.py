@@ -62,14 +62,14 @@ class ToolFailure(Exception):
 class Tool(ABC):
     """One thing the model can ask us to do."""
 
-    #: The name the model uses. Must match the declaration exactly.
+    # The name the model uses. Must match the declaration exactly.
     name: ClassVar[str]
-    #: Shown to the model. This is prompt engineering — it is the only thing the
-    #: model reads when deciding whether this tool is the right one, so it should
-    #: say when *not* to use it as well as when to.
+    # Shown to the model. This is prompt engineering — it is the only thing the
+    # model reads when deciding whether this tool is the right one, so it should
+    # say when *not* to use it as well as when to.
     description: ClassVar[str]
-    #: Arguments, as a flat Pydantic model. Flat on purpose: nested models produce
-    #: `$defs` references that provider schemas handle inconsistently.
+    # Arguments, as a flat Pydantic model. Flat on purpose: nested models produce
+    # `$defs` references that provider schemas handle inconsistently.
     args_model: ClassVar[type[BaseModel]]
 
     @abstractmethod
