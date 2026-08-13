@@ -83,6 +83,7 @@ from app.prompts.loader import Prompt, load_prompt
 from app.reliability.failures import ResponseInvalid
 from app.reliability.pipeline import validate_tutor_response
 from app.schemas.tutor import TutorAnswer
+from app.services import document as document_service
 from app.services import room as room_service
 from app.tools import registry as tool_registry
 from app.tools.base import ToolContext, ToolFailure, ToolStatus
@@ -96,7 +97,7 @@ TUTOR_PROMPT = "tutor_system"
 # appearing. The cost of pinning is that adding a version and forgetting this line
 # leaves the new prompt inert — which happened once, in S5, and is why
 # `tests/test_prompts.py` now asserts these constants are the newest on disk.
-TUTOR_PROMPT_VERSION = 5
+TUTOR_PROMPT_VERSION = 6
 REPAIR_PROMPT = "tutor_repair"
 REPAIR_PROMPT_VERSION = 1
 
@@ -379,6 +380,10 @@ async def create_turn(
         education_level=student.education_level,
         room_title=room.title,
         recent_turns=await _recent_turns(db, room),
+        # Names only, never contents. Without this the model cannot tell whether
+        # the room holds a slide deck or nothing at all, and a tool it does not
+        # know is worth calling is a tool it does not call.
+        materials=await document_service.describe_materials(db, room),
         student_message=message,
     )
 
