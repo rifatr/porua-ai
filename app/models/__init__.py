@@ -6,6 +6,7 @@ is the usual reason a new table is missing from a migration.
 """
 
 from app.db.base import Base
+from app.models.document import Document, DocumentChunk
 from app.models.room import Room
 from app.models.student import Student
 from app.models.tool_call import ToolCall
@@ -15,6 +16,8 @@ from app.models.turn_attempt import AttemptPurpose, TurnAttempt
 __all__ = [
     "AttemptPurpose",
     "Base",
+    "Document",
+    "DocumentChunk",
     "Room",
     "Student",
     "ToolCall",
