@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.base import EmptyResponse, ProviderUnavailable
 from app.models.student import Student
 from app.models.turn import Turn
+from app.services.turn import TUTOR_PROMPT_VERSION
 from tests.fakes import FakeLLM
 
 
@@ -207,7 +208,10 @@ async def test_inspection_shows_the_prompt_its_version_and_checksum(
     assert len(detail["attempts"]) == 1
     attempt = detail["attempts"][0]
     assert attempt["prompt_name"] == "tutor_system"
-    assert attempt["prompt_version"] == 2
+    # Against the constant, not a number. What matters is that the attempt records
+    # whichever version actually produced it — pinning a literal here only means
+    # this test breaks every time a prompt is versioned, which is routine.
+    assert attempt["prompt_version"] == TUTOR_PROMPT_VERSION
     assert len(attempt["prompt_sha256"]) == 64
     assert "hi" in attempt["rendered_prompt"]
     assert attempt["request_params"]["model"]

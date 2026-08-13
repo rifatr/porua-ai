@@ -12,7 +12,7 @@ for, and the real model will not perform them on request.
 
 import json
 
-from app.llm.base import LLMError, LLMRequest, LLMResponse
+from app.llm.base import LLMError, LLMRequest, LLMResponse, ToolInvocation
 
 DEFAULT_ANSWER = "Subtract 6 from both sides, then divide by 3. x = 3."
 DEFAULT_CONCEPTS = ["inverse operations", "linear equations"]
@@ -51,6 +51,7 @@ class FakeLLM:
         answers: list[str] | None = None,
         error: LLMError | None = None,
         errors: list[LLMError | None] | None = None,
+        tool_calls: list[list[tuple[str, dict]] | None] | None = None,
         prompt_tokens: int = 100,
         output_tokens: int = 40,
         thought_tokens: int = 250,
@@ -60,6 +61,11 @@ class FakeLLM:
         # is what a transient rate limit looks like — fail, fail, then succeed.
         self._error = error
         self._errors = list(errors) if errors else None
+        # One entry per call: a list of (tool_name, arguments) to request, or None
+        # to answer instead. This is how a test drives the agent loop — asking the
+        # real model to call a tool twice, or to name one that does not exist, is
+        # not something it will do on request.
+        self._tool_calls = list(tool_calls) if tool_calls else None
         self._tokens = (prompt_tokens, output_tokens, thought_tokens)
         self.calls: list[LLMRequest] = []
 
@@ -82,12 +88,37 @@ class FakeLLM:
             if queued is not None:
                 raise queued
 
+        prompt_tokens, output_tokens, thought_tokens = self._tokens
+
+        if self._tool_calls:
+            requested = self._tool_calls.pop(0)
+            # Only when tools were actually offered. The real model cannot call a
+            # tool that was not declared to it, so a fake that ignores this would
+            # let the runaway-loop tests pass against a loop that never stops
+            # offering tools — testing the opposite of what they claim.
+            if requested and not request.tools:
+                requested = None
+            if requested:
+                # A response that asks for tools carries no answer text, exactly
+                # as the real client reports it.
+                return LLMResponse(
+                    text="",
+                    finish_reason="STOP",
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=output_tokens,
+                    thought_tokens=thought_tokens,
+                    raw="",
+                    tool_calls=tuple(
+                        ToolInvocation(name=name, arguments=arguments)
+                        for name, arguments in requested
+                    ),
+                )
+
         # The queue runs out rather than repeating: a test that expected three
         # responses and got a fourth call has found a bug in the loop, and should
         # see a valid answer rather than an index error.
         text = self._answers.pop(0) if self._answers else tutor_json()
 
-        prompt_tokens, output_tokens, thought_tokens = self._tokens
         return LLMResponse(
             text=text,
             finish_reason="STOP",
