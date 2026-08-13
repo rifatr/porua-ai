@@ -54,6 +54,42 @@ class ResponseBlocked(LLMError):
 
 
 @dataclass(frozen=True)
+class ToolSpec:
+    """What the model is told a tool can do.
+
+    `parameters` is a JSON Schema object, produced from the tool's Pydantic
+    argument model. Describing the tool in a standard format rather than a
+    Gemini-specific one is what keeps this file provider-agnostic — the client
+    translates it, nothing above the client knows the translation happened.
+    """
+
+    name: str
+    description: str
+    parameters: dict
+
+
+@dataclass(frozen=True)
+class ToolInvocation:
+    """The model asking for a tool to run. Untrusted: these are model output.
+
+    `arguments` is whatever the model produced. It is *not* validated here — the
+    registry checks it against the tool's own Pydantic model before anything runs,
+    which is what stops a malformed or hostile argument reaching a function.
+    """
+
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """What we send back after running a tool."""
+
+    name: str
+    content: dict
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     text: str
     finish_reason: str
@@ -63,6 +99,9 @@ class LLMResponse:
     # honest and so we can tell "the model rambled" from "the model thought hard".
     thought_tokens: int = 0
     raw: str = ""
+    # Non-empty when the model asked for tools instead of answering. A response
+    # carries one or the other, never usefully both.
+    tool_calls: tuple[ToolInvocation, ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -81,7 +120,30 @@ class LLMRequest:
     # output mode can honour it, and one without it can ignore the field — which is
     # what keeps `LLMClient` a Protocol rather than a Gemini interface.
     response_schema: type[BaseModel] | None = None
+
+    # Tools the model may ask for on this call.
+    #
+    # `tools` and `response_schema` cannot both be set. That is not our rule, it is
+    # the provider's — Gemini answers a request carrying both with
+    # 400 "Function calling with a response mime type: 'application/json' is
+    # unsupported". So a call either gathers information or produces a constrained
+    # final answer, and `__post_init__` refuses the combination rather than letting
+    # it fail at the API with a message nobody reads.
+    tools: tuple[ToolSpec, ...] = ()
+
+    # Tool calls already made on this turn, with their results, so the model can
+    # see what it asked for and what came back. Grows by one pair per loop.
+    tool_exchanges: tuple[tuple[ToolInvocation, ToolResult], ...] = ()
+
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.tools and self.response_schema is not None:
+            raise ValueError(
+                "tools and response_schema cannot both be set: the provider "
+                "rejects the combination. Attach tools while gathering, and a "
+                "schema on the call that produces the final answer."
+            )
 
     def as_params(self) -> dict:
         """What gets stored in turn_attempts.request_params.
@@ -100,6 +162,11 @@ class LLMRequest:
             "response_schema": (
                 self.response_schema.__name__ if self.response_schema else None
             ),
+            # Names only. Which tools were *offered* on this call is the thing
+            # worth seeing when reading an attempt back — the full declarations
+            # are the same on every call and would bury everything else.
+            "tools": [spec.name for spec in self.tools],
+            "tool_exchanges": len(self.tool_exchanges),
             **self.extra,
         }
 

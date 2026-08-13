@@ -18,6 +18,7 @@ from app.llm.base import (
     LLMResponse,
     ProviderUnavailable,
     ResponseBlocked,
+    ToolInvocation,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,10 +48,27 @@ class GeminiClient:
             config.response_mime_type = "application/json"
             config.response_schema = request.response_schema
 
+        if request.tools:
+            # `parameters_json_schema` takes the Pydantic schema as-is, so the
+            # declaration the model sees is generated from the same class the
+            # arguments are later validated against. They cannot drift apart.
+            config.tools = [
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name=spec.name,
+                            description=spec.description,
+                            parameters_json_schema=spec.parameters,
+                        )
+                        for spec in request.tools
+                    ]
+                )
+            ]
+
         try:
             response = await self._client.aio.models.generate_content(
                 model=request.model,
-                contents=request.prompt,
+                contents=self._contents(request),
                 config=config,
             )
         except genai_errors.APIError as exc:
@@ -61,6 +79,46 @@ class GeminiClient:
             raise ProviderUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
         return self._normalise(response)
+
+    @staticmethod
+    def _contents(request: LLMRequest) -> list[types.Content]:
+        """The conversation so far: the prompt, then each tool call and its result.
+
+        Function calling is multi-turn by nature. The model has to see that it
+        asked for `evaluate_expression`, and what came back, or it will simply ask
+        again. So every exchange is replayed on the next call, in the two-message
+        shape the API expects: a `model` turn holding the call, a `user` turn
+        holding the response.
+        """
+        contents = [types.Content(role="user", parts=[types.Part(text=request.prompt)])]
+
+        for invocation, result in request.tool_exchanges:
+            contents.append(
+                types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name=invocation.name, args=invocation.arguments
+                            )
+                        )
+                    ],
+                )
+            )
+            contents.append(
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                name=result.name, response=result.content
+                            )
+                        )
+                    ],
+                )
+            )
+
+        return contents
 
     @staticmethod
     def _normalise(response: types.GenerateContentResponse) -> LLMResponse:
@@ -74,9 +132,27 @@ class GeminiClient:
         # "FinishReason.STOP" -> "STOP"
         finish_reason = finish_reason.rsplit(".", 1)[-1]
 
-        text = response.text or ""
+        # Read the parts directly rather than `response.text`. A response holding
+        # function calls has no usable `.text`, and touching it warns or returns
+        # None — so the same accessor cannot serve both kinds of reply.
+        content = getattr(candidate, "content", None)
+        parts = list(getattr(content, "parts", None) or [])
 
-        if not text.strip():
+        text = "".join(part.text for part in parts if getattr(part, "text", None))
+        tool_calls = tuple(
+            ToolInvocation(
+                name=part.function_call.name,
+                # dict() because the SDK hands back a mapping proxy, and this
+                # value is stored as JSON and passed to Pydantic validation.
+                arguments=dict(part.function_call.args or {}),
+            )
+            for part in parts
+            if getattr(part, "function_call", None)
+        )
+
+        # A reply that asks for tools legitimately has no text. Only an empty
+        # reply with nothing to run is a failure.
+        if not text.strip() and not tool_calls:
             if finish_reason == "MAX_TOKENS":
                 raise EmptyResponse(
                     "The model used its entire output budget on thinking and "
@@ -85,6 +161,12 @@ class GeminiClient:
                 )
             if finish_reason in {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"}:
                 raise ResponseBlocked(f"Provider refused to answer ({finish_reason}).")
+            if finish_reason == "MALFORMED_FUNCTION_CALL":
+                # The model tried to call a tool and produced something the
+                # provider could not parse. Nondeterministic, so worth retrying.
+                raise EmptyResponse(
+                    "The model emitted a malformed function call and no answer."
+                )
             raise EmptyResponse(f"Empty response with finish_reason={finish_reason}.")
 
         return LLMResponse(
@@ -94,4 +176,5 @@ class GeminiClient:
             output_tokens=output_tokens,
             thought_tokens=thought_tokens,
             raw=text,
+            tool_calls=tool_calls,
         )
