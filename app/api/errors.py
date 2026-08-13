@@ -61,6 +61,44 @@ class ConflictError(AppError):
     title = "Conflicting request"
 
 
+class UnsupportedFileError(AppError):
+    """Wrong type, or a type that does not match the contents.
+
+    415 rather than 422: the request itself was well-formed, and the problem is
+    the media it carried. A client seeing this should offer a different file, not
+    retry the same one.
+    """
+
+    status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    code = "UNSUPPORTED_TYPE"
+    title = "Unsupported file type"
+
+
+class FileTooLargeError(AppError):
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    code = "FILE_TOO_LARGE"
+    title = "File too large"
+
+
+class UnreadableFileError(AppError):
+    """The right type, but nothing usable came out of it.
+
+    Covers a corrupt archive, a password-protected file, a scanned PDF with no
+    text layer, and a file that opens perfectly and contains no words. The
+    distinction between them is carried in `code`, set per case at the raise site,
+    because "we could not read your file" is the same sentence for all four and
+    the reason is the part worth acting on.
+    """
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "UNREADABLE_FILE"
+    title = "File could not be read"
+
+    def __init__(self, detail: str, *, code: str, **extra: object) -> None:
+        self.code = code
+        super().__init__(detail, **extra)
+
+
 def _problem(
     request: Request,
     *,
