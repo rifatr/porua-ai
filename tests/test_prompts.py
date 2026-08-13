@@ -9,6 +9,12 @@ import pytest
 from jinja2 import UndefinedError
 
 from app.prompts.loader import PromptError, latest_version, load_prompt
+from app.services.turn import (
+    REPAIR_PROMPT,
+    REPAIR_PROMPT_VERSION,
+    TUTOR_PROMPT,
+    TUTOR_PROMPT_VERSION,
+)
 
 
 def test_loads_the_tutor_prompt() -> None:
@@ -52,3 +58,30 @@ def test_a_missing_prompt_is_an_error() -> None:
 
 def test_latest_version_finds_the_highest_on_disk() -> None:
     assert latest_version("tutor_system") >= 1
+
+
+@pytest.mark.parametrize(
+    ("name", "pinned"),
+    [
+        (TUTOR_PROMPT, TUTOR_PROMPT_VERSION),
+        (REPAIR_PROMPT, REPAIR_PROMPT_VERSION),
+    ],
+)
+def test_the_pinned_prompt_is_the_newest_one_written(name: str, pinned: int) -> None:
+    """Writing a new prompt version and not switching to it leaves it inert.
+
+    That is exactly what happened in S5: `tutor_system` v4 introduced the
+    `search_room_materials` tool, the constant still said 3, and v3 tells the
+    model it has two tools — so the third was declared to the provider and talked
+    out of existence by the prompt. Nothing failed. Answers were merely worse, and
+    the only evidence was `prompt_version: 3` on a stored attempt.
+
+    The version stays pinned rather than resolved from disk, because a prompt
+    change is a behavioural change and should be a reviewed commit. This test is
+    the other half of that trade: pinning is deliberate, forgetting is not.
+    """
+    assert pinned == latest_version(name), (
+        f"{name} v{latest_version(name)} exists but the code still uses "
+        f"v{pinned}. Bump the constant in app/services/turn.py, or delete the "
+        f"unused prompt file."
+    )
