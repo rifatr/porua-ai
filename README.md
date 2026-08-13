@@ -21,10 +21,14 @@ and tests, rather than a layer at a time. The reasoning is in
 | **S1** Rooms | Create / list / open / delete rooms | ✅ Done |
 | **S2** Turns | Talk to Gemini, record every attempt, inspect a turn | ✅ Done |
 | **S3** Reliability | Parse → schema → content checks → repair loop, with retries | ✅ Done |
-| **S4** Tools | Tool registry with hard limits, study-history and calculator tools | ⬜ Not started |
+| **S4** Tools | Tool registry with hard limits, study-history and calculator tools | ✅ Done |
 | **S5** Documents | Upload and extract `.docx` / `.pdf` / `.pptx`, search over them | ⬜ Not started |
 | **S6** Skills | Quiz builder and step-by-step maths solver, both verified in code | ⬜ Not started |
-| **S7** History | Study history over a date range | ⬜ Not started |
+| **S7** History | Study history over a date range | ✅ Done — pulled into S4 |
+
+S7 came early because the study-history *query* is the expensive part and S4's tool
+needed it. The endpoint is fifteen lines on top of the same service, so building both at once cost
+almost nothing and removed a slice from the last day.
 
 **Everything below describes what is actually built and running.** Anything not yet built is
 marked as such rather than described as if it exists.
@@ -138,7 +142,7 @@ Every command works either way. Inside Docker, prefix with `docker compose exec 
 ### Tests
 
 ```bash
-pytest                       # all 54
+pytest                       # all 179
 pytest -q                    # quiet
 pytest tests/test_turns.py   # one file
 pytest -k "cursor"           # by name
@@ -164,24 +168,29 @@ alembic revision --autogenerate -m "add_document_chunks"
 #    It reliably misses partial indexes, CHECK constraints, generated columns,
 #    enum drops, and every data migration.
 
-# 3. apply it
-alembic upgrade head
+# 3. prove it reverses — on a THROWAWAY database, never your own
+./scripts/check_migration.sh
 
-# 4. prove it reverses — a migration that cannot be undone cannot be tested
-alembic downgrade -1
+# 4. apply it to your development database, forward only
 alembic upgrade head
-
-# 5. confirm the models and the migrations now agree
-alembic check                # must say: No new upgrade operations detected
 ```
+
+**Step 3 uses a scratch database on purpose.** A migration that cannot be undone cannot be trusted,
+so the round trip has to be run — but running `downgrade` against a database holding your own data
+destroys it. Once, here, a failed `upgrade` piped through `tail` returned exit code 0, so `&&` did
+not stop the chain, and the `downgrade -1` that followed reversed the *previous* migration and
+dropped the `turns` table. `scripts/check_migration.sh` creates its own database, round-trips
+`upgrade → downgrade base → upgrade → check` inside it, and drops it again. Nothing it does can
+reach your data.
 
 Other useful ones:
 
 ```bash
 alembic current              # which revision is applied
 alembic history --verbose    # the chain
-alembic downgrade base       # unwind everything
 ```
+
+`alembic downgrade` is deliberately absent from this list. Use the script.
 
 `alembic check` has already caught two real bugs in this project: a column type that had drifted
 from its model, and an enum type that was created but never dropped on downgrade.
@@ -200,6 +209,33 @@ Without `-v` the volume survives, which is how *"data must persist between runs"
 docker compose restart api
 curl -s localhost:8000/rooms -H "X-Student-Id: $SID"   # your rooms are still there
 ```
+
+### Seeding demo data
+
+Study history cannot be judged on two turns from this morning. This writes six weeks of them, with
+no Gemini calls, so it is instant and free:
+
+```bash
+docker compose exec api python scripts/seed_demo_data.py
+```
+
+It prints the student id and two commands: one reading the history endpoint directly, one asking
+the tutor the same question so it reaches the data through `query_study_history`.
+
+Running it a second time does nothing — it prints the existing id and stops, rather than doubling
+the data. To start clean:
+
+```bash
+docker compose exec db psql -U porua -d porua \
+  -c "DELETE FROM students WHERE display_name = 'Demo Student'"
+```
+
+Every foreign key cascades from the student, so that removes the rooms and turns with it. Only the
+seeded student is touched.
+
+The seed deliberately includes one **failed** and one **off-topic** turn, which history must
+exclude. If either ever appears in the totals, the filter has broken — and that is the kind of bug
+that produces plausible numbers nobody questions.
 
 ### Recording Gemini fixtures
 
@@ -254,6 +290,7 @@ app/
   db/               engine, session, declarative base + naming convention
   llm/              the provider boundary: one Protocol, a Gemini client, record/replay
   reliability/      parse → schema → content. Pure functions, no I/O, no database
+  tools/            what the model may ask for; the fixed registry
   models/           SQLAlchemy models (the database)
   prompts/          the loader; the prompt text itself lives in prompts/ at the root
   schemas/          Pydantic models (the API contract) — deliberately separate
@@ -277,6 +314,70 @@ column is added, and internal columns should never be exposed by accident.
 ## Important decisions
 
 Fuller reasoning for each is in [`docs/PLAN.md`](docs/PLAN.md). These are the ones I would defend.
+
+### The model asks for tools; it never runs anything
+
+The brief asks that *"the model should not call arbitrary code or call tools indefinitely"*. Five
+independent protections, because relying on one is fragile:
+
+| # | Protection | Where |
+|---|---|---|
+| 1 | **A fixed list.** A dict lookup, filled at import. No `getattr`, no import, no dispatch from model output. | `app/tools/registry.py` |
+| 2 | **Arguments validated first.** Using the same Pydantic model that generated the declaration the model read, so the two cannot drift. | `registry.validate_arguments` |
+| 3 | **Identity from the request.** No tool takes a student id, so the model cannot ask for another student's data. | `app/tools/base.py` |
+| 4 | **Four budgets and a deadline.** 5 tool rounds, 6 tool calls, 8s per tool, 45s per turn. | `app/services/turn.py` |
+| 5 | **Repeat calls answered from cache**, with a note telling the model to stop. | `app/services/turn.py` |
+
+Two of these are worth more than the others.
+
+**Protection 1 is not a check that could be incomplete** — there is no mechanism by which an
+unlisted name becomes callable. "We validate the tool name against a list" sounds similar and is
+much weaker.
+
+**Protection 3 works by absence.** A `student_id` argument that gets checked can be forgotten on
+the next tool; a parameter that does not exist cannot. A test asserts it stays that way for every
+tool added later.
+
+**Running out of budget does not fail the turn.** The tools simply stop being *offered*, so the
+model has to answer with what it already gathered. A student who is waiting gets an answer rather
+than an error, and the loop still terminates. `tests/test_tools.py` has the runaway-loop case.
+
+### `evaluate_expression` cannot run anything but arithmetic
+
+It takes a string written by a language model and evaluates it, which is the most dangerous shape a
+function can have. It does **not** use `eval`, because `eval` cannot be made safe by filtering:
+
+```python
+eval("(1).__class__.__bases__[0].__subclasses__()")   # integer → every loaded class → files
+```
+
+Instead the expression is parsed to a syntax tree and every node checked against an allow-list of
+seven types. `ast.Attribute` is not among them, so a `.` cannot be written at all — and every
+escape of that kind begins with one. The claim is not "we thought of the bad inputs", it is "only
+these seven node types can execute".
+
+Size limits sit alongside, because `9 ** 9 ** 9` is made entirely of *allowed* nodes and would
+still hang the process. Worth knowing: the 8-second tool timeout does **not** help there —
+`asyncio.wait_for` cannot interrupt synchronous CPU work. The limits are the real defence.
+
+`tests/test_calculator.py` runs eleven real attacks, including both subclass walks.
+
+### Tools and structured output cannot be used together
+
+Verified against the API before designing around it:
+
+```
+400 INVALID_ARGUMENT
+"Function calling with a response mime type: 'application/json' is unsupported"
+```
+
+So each call is either gathering (tools, no schema) or answering (schema, no tools);
+`LLMRequest.__post_init__` refuses the combination rather than letting it fail at the provider.
+
+The consequence is the interesting part: **constrained decoding is unavailable exactly while the
+model can call tools.** During a tool-using turn the parse → schema → content pipeline is the only
+thing between model output and the student. `response_schema` did not make that pipeline redundant;
+it narrowed it to where it is the sole defence.
 
 ### Nothing unchecked reaches the student
 
@@ -483,7 +584,13 @@ The scheme, since the brief asks for prompts to be *"readable and versioned"*:
 
 Current, honest:
 
-- **S0 to S3 are built.** No documents, tools or skills yet.
+- **S0 to S4 are built, plus S7.** No documents (S5) or skills (S6) yet.
+- **The tool timeout cannot interrupt CPU-bound work.** `asyncio.wait_for` cancels at an
+  `await`, and `evaluate_expression` is synchronous. Its real protection is the size limits on
+  exponents, factorials and expression length, not the 8-second timeout.
+- **A tool timeout fails the whole turn.** Cancelling a database query mid-flight leaves the
+  session in a state not worth continuing to write through, so the turn ends rather than
+  carrying on. Deliberate, and the reason is in `app/services/turn.py`.
 - **Room context is the last 6 in-scope turns**, not a summary. Long rooms therefore mean long
   prompts. The fix is a `room_summaries` table; it is designed, not built.
 - **`tests/fixtures/llm/recorded/` is empty.** A fixture is keyed by the exact request, prompt text
