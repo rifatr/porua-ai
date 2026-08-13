@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.errors import register_error_handlers
-from app.api.routes import health, rooms, students, turns
+from app.api.routes import documents, health, rooms, students, turns
 from app.config import get_settings
 from app.db.session import engine
 
@@ -44,6 +44,13 @@ app = FastAPI(
             "name": "turns",
             "description": "One question and answer inside a room. Where the AI runs.",
         },
+        {
+            "name": "documents",
+            "description": (
+                "Study material uploaded to a room. The tutor searches it through "
+                "the `search_room_materials` tool."
+            ),
+        },
     ],
 )
 
@@ -53,3 +60,5 @@ app.include_router(students.router)
 app.include_router(rooms.router)
 app.include_router(turns.rooms_router)
 app.include_router(turns.turns_router)
+app.include_router(documents.rooms_router)
+app.include_router(documents.documents_router)
