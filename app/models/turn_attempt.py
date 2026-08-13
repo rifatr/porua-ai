@@ -41,6 +41,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, UUIDPrimaryKey
 
 if TYPE_CHECKING:
+    from app.models.tool_call import ToolCall
     from app.models.turn import Turn
 
 
@@ -106,6 +107,11 @@ class TurnAttempt(UUIDPrimaryKey, Base):
     )
 
     turn: Mapped["Turn"] = relationship(back_populates="attempts")
+    tool_calls: Mapped[list["ToolCall"]] = relationship(
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+        order_by="ToolCall.call_no",
+    )
 
     @property
     def duration_ms(self) -> int | None:

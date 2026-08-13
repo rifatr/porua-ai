@@ -75,8 +75,17 @@ class TurnFailureReason(enum.StrEnum):
     # carry `validation_failures` saying which layer objected and why.
     INVALID_AFTER_REPAIR = "INVALID_AFTER_REPAIR"
 
-    # The per-turn ceiling on model calls was reached. Unreachable with the
-    # default budgets; see services/turn.py.
+    # A tool ran past its timeout and was cancelled. The turn ends rather than
+    # carrying on: cancelling a database query mid-flight leaves the session in a
+    # state we should not keep writing through.
+    TOOL_TIMED_OUT = "TOOL_TIMED_OUT"
+
+    # The whole turn took longer than the deadline. The student is waiting
+    # synchronously, so there is a point past which failing beats continuing.
+    TURN_DEADLINE_EXCEEDED = "TURN_DEADLINE_EXCEEDED"
+
+    # The per-turn ceiling on model calls was reached. Should be unreachable —
+    # every other budget bites first; see services/turn.py.
     ATTEMPT_LIMIT_EXCEEDED = "ATTEMPT_LIMIT_EXCEEDED"
 
 

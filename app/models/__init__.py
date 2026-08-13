@@ -8,7 +8,8 @@ is the usual reason a new table is missing from a migration.
 from app.db.base import Base
 from app.models.room import Room
 from app.models.student import Student
-from app.models.turn import Turn, TurnStatus
+from app.models.tool_call import ToolCall
+from app.models.turn import Turn, TurnFailureReason, TurnStatus
 from app.models.turn_attempt import AttemptPurpose, TurnAttempt
 
 __all__ = [
@@ -16,7 +17,9 @@ __all__ = [
     "Base",
     "Room",
     "Student",
+    "ToolCall",
     "Turn",
     "TurnAttempt",
+    "TurnFailureReason",
     "TurnStatus",
 ]
