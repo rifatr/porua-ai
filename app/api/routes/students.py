@@ -60,7 +60,10 @@ async def get_me(student: CurrentStudent) -> StudentRead:
         "taught nothing, and an off-topic question is not revision of the room's "
         "subject — counting either would quietly inflate every number here.\n\n"
         "Both dates are optional: omit `from_date` for the last 30 days, omit "
-        "`to_date` for 'up to today'. `to_date` is inclusive.\n\n"
+        "`to_date` for 'up to today'. `to_date` is inclusive. The range cannot "
+        "exceed 366 days.\n\n"
+        "This is a summary, not a feed, so there is no pagination. Both lists are "
+        "capped instead — see the response schema for the limits.\n\n"
         "The AI tutor reads the same data through the `query_study_history` tool, "
         "over this exact service — so the two can never disagree."
     ),

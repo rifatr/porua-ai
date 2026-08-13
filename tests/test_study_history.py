@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.room import Room
 from app.models.student import Student
 from app.models.turn import Turn, TurnFailureReason, TurnStatus
+from app.services.study_history import TOP_CONCEPTS, TOP_ROOMS
 
 
 async def add_room(db: AsyncSession, student: Student, title: str) -> Room:
@@ -259,3 +260,49 @@ async def test_an_unbounded_range_is_rejected(
     )
     assert response.status_code == 422
     assert "366" in response.json()["detail"]
+
+
+# --- the caps ---------------------------------------------------------------
+
+
+async def test_rooms_are_capped_at_the_most_recent(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    """The date range alone does not bound the result — inside one year a student
+    can open any number of rooms. The cap keeps what they are working on now."""
+    for index in range(TOP_ROOMS + 5):
+        # Room 0 studied longest ago, so the five oldest fall off the end.
+        room = await add_room(db, student, f"Room {index}")
+        await add_turn(db, room, 1, days_ago=TOP_ROOMS + 5 - index)
+
+    # An explicit range, because one room per day runs past the 30-day default.
+    since = (date.today() - timedelta(days=90)).isoformat()
+    body = await history(client, auth, f"?from_date={since}")
+
+    assert len(body["rooms"]) == TOP_ROOMS
+    titles = [room["title"] for room in body["rooms"]]
+    assert titles[0] == f"Room {TOP_ROOMS + 4}"
+    assert "Room 0" not in titles
+    # One turn per room, and the total follows the rooms returned rather than
+    # counting the ones the cap dropped.
+    assert body["total_turns"] == TOP_ROOMS
+
+
+async def test_concepts_are_capped_at_the_most_studied(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    room = await add_room(db, student, "Everything")
+    for index in range(TOP_CONCEPTS + 5):
+        # Concept 0 tagged once, concept 1 twice, and so on — so the rarest are
+        # the ones the cap should drop.
+        for seq in range(index + 1):
+            await add_turn(
+                db, room, index * 100 + seq + 1, concepts=[f"concept {index}"]
+            )
+
+    body = await history(client, auth)
+
+    assert len(body["concepts"]) == TOP_CONCEPTS
+    returned = {item["concept"] for item in body["concepts"]}
+    assert f"concept {TOP_CONCEPTS + 4}" in returned
+    assert "concept 0" not in returned

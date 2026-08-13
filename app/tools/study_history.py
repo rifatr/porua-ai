@@ -50,8 +50,9 @@ class StudyHistoryTool(Tool):
         "did I study last week', 'have I covered this before', 'what should I "
         "revise' — and whenever knowing what they have already seen would change "
         "how you explain something. Only counts real study: failed and off-topic "
-        "turns are excluded. Never guess at this; the answer is in the database "
-        "and guessing it wrong is worse than not answering."
+        "turns are excluded, and the busiest rooms and concepts are returned "
+        "rather than every one. Never guess at this; the answer is in the "
+        "database and guessing it wrong is worse than not answering."
     )
     args_model: ClassVar[type[BaseModel]] = StudyHistoryArgs
 

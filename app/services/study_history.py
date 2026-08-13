@@ -20,6 +20,15 @@ the reader that `in_scope` was stored for.
 demand with a `GROUP BY`. Storing running totals somewhere would be a second copy
 of a fact already recorded, and second copies drift — a turn deleted or re-tagged
 would leave the total wrong with nothing to notice it.
+
+## Caps, and why there is no pagination
+
+Both lists are capped, and the date range is capped at a year. This is a summary,
+not a feed — nobody asks for page three of "what did I study", and offset paging
+over a `GROUP BY` re-runs the whole aggregation for each page, so it costs the
+same and returns less. A cap answers the question a page token would: the result
+cannot grow without bound. The caps are documented on the response schema so a
+caller past them knows what they are looking at rather than guessing.
 """
 
 from dataclasses import dataclass
@@ -36,6 +45,13 @@ from app.models.turn import Turn, TurnStatus
 
 DEFAULT_WINDOW_DAYS = 30
 MAX_WINDOW_DAYS = 366
+
+# Both lists are capped. The date window alone does not bound them: inside one
+# year a student can open any number of rooms and cover any number of concepts,
+# and every one would come back. The cap matters most on the tool path, where
+# this result is fed straight back into the model's next prompt — an unbounded
+# list there spends the context budget that the actual answer needs.
+TOP_ROOMS = 50
 TOP_CONCEPTS = 15
 
 
@@ -129,7 +145,10 @@ async def get_study_history(
         .join(Room, Room.id == Turn.room_id)
         .where(*conditions)
         .group_by(Room.id, Room.title)
+        # Most recently studied first, so the cap keeps what a student is working
+        # on now and drops rooms they have moved on from.
         .order_by(func.max(Turn.created_at).desc())
+        .limit(TOP_ROOMS)
     )
     rooms = [
         RoomActivity(room_id=row.id, title=row.title, turns=row.turns,
@@ -177,8 +196,10 @@ async def get_study_history(
     return StudyHistory(
         from_date=from_date,
         to_date=to_date,
-        # Summed from the rooms rather than counted again. One less query, and the
-        # two numbers cannot disagree.
+        # Summed from the rooms above rather than counted again. One less query,
+        # and the two numbers cannot disagree — this is the total for the rooms
+        # returned, not for every room in the range. Past the cap the two part
+        # ways, which is why the field says so in the response schema.
         total_turns=sum(room.turns for room in rooms),
         rooms=rooms,
         concepts=concepts,
