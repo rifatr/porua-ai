@@ -59,9 +59,9 @@ async def get_me(student: CurrentStudent) -> StudentRead:
         "Counts only turns that **succeeded** and were **in scope**. A failed turn "
         "taught nothing, and an off-topic question is not revision of the room's "
         "subject — counting either would quietly inflate every number here.\n\n"
-        "Both dates are optional: omit `from_date` for the last 30 days, omit "
-        "`to_date` for 'up to today'. `to_date` is inclusive. The range cannot "
-        "exceed 366 days.\n\n"
+        "Dates are `YYYY-MM-DD`. Both are optional: omit `from_date` for the last "
+        "30 days, omit `to_date` for 'up to today'. `to_date` is inclusive, and "
+        "the range cannot exceed 366 days.\n\n"
         "This is a summary, not a feed, so there is no pagination. Both lists are "
         "capped instead — see the response schema for the limits.\n\n"
         "The AI tutor reads the same data through the `query_study_history` tool, "
@@ -71,13 +71,25 @@ async def get_me(student: CurrentStudent) -> StudentRead:
 async def get_study_history(
     db: DbSession,
     student: CurrentStudent,
+    # `YYYY-MM-DD` is spelled out because the type alone does not say it. Swagger
+    # renders a `date` field as the browser's native date picker, which displays
+    # in the reader's locale — `1/2/2025` to an American, the second of January to
+    # everyone else — while the API only ever accepts ISO 8601.
     from_date: Annotated[
         date | None,
-        Query(description="Start of the range. Defaults to 30 days ago."),
+        Query(
+            description="Start of the range, as `YYYY-MM-DD`. Defaults to 30 days ago.",
+            examples=["2026-07-15"],
+        ),
     ] = None,
     to_date: Annotated[
         date | None,
-        Query(description="End of the range, inclusive. Defaults to today."),
+        Query(
+            description=(
+                "End of the range, as `YYYY-MM-DD`, inclusive. Defaults to today."
+            ),
+            examples=["2026-08-13"],
+        ),
     ] = None,
 ) -> StudyHistoryRead:
     # Scoped to the caller, like every other read. The path says `/me` rather than

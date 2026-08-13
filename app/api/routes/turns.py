@@ -60,7 +60,10 @@ async def list_turns(
     db: DbSession,
     student: CurrentStudent,
     limit: PageLimit,
-    cursor: str | None = Query(default=None),
+    cursor: str | None = Query(
+        default=None,
+        description="The `next_cursor` value from the previous response.",
+    ),
 ) -> Page[TurnRead]:
     rows = await turn_service.list_turns(
         db, student, room_id, cursor=cursor, limit=limit
