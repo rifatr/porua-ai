@@ -27,3 +27,20 @@ class DocumentRead(BaseModel):
         "these, and cites the page each one came from."
     )
     created_at: datetime
+
+
+class DocumentUploadRead(DocumentRead):
+    """The upload response: the stored document, plus anything it displaced.
+
+    `evicted` exists so removing a student's file is never silent. A room keeps a
+    fixed number of documents and drops the oldest to admit a new one, which is
+    kinder than refusing the upload — but only if they are told, in the response
+    to the request that did it, rather than finding out weeks later when the
+    tutor stops citing something.
+    """
+
+    evicted: list[str] = Field(
+        default_factory=list,
+        description="Files removed to stay within the per-room limit, oldest "
+        "first. Empty in the normal case.",
+    )

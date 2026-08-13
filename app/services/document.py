@@ -32,6 +32,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -55,9 +56,31 @@ logger = logging.getLogger(__name__)
 DEFAULT_SEARCH_LIMIT = 5
 MAX_SEARCH_LIMIT = 10
 
+# Files kept per room. Reaching it evicts the oldest rather than refusing the
+# upload: a student part-way through studying should not hit a wall, and the file
+# they are reaching for now matters more than one from last term. The number is
+# bounded by what the tutor prompt can carry — every filename is listed there so
+# the model knows the material exists, and a list of fifty would cost more
+# context than the answers it is meant to improve.
+MAX_DOCUMENTS_PER_ROOM = 10
+
 # Words used from a query on the broad pass. A cap so a model that sends a whole
 # paragraph produces a bounded tsquery rather than one OR term per word.
 MAX_QUERY_TERMS = 12
+
+
+@dataclass(frozen=True)
+class UploadResult:
+    """The stored document, and anything evicted to make room for it.
+
+    `evicted` is returned rather than only logged because deleting a student's
+    file is not a detail. They uploaded it; if it is gone they should be told by
+    the request that removed it, not discover it later when the tutor stops
+    finding it.
+    """
+
+    document: "Document"
+    evicted: list[str]
 
 
 @dataclass(frozen=True)
@@ -84,7 +107,7 @@ async def create_document(
     *,
     filename: str,
     data: bytes,
-) -> Document:
+) -> UploadResult:
     """Read a file into the room, or refuse it with a typed reason."""
     room = await room_service.get_room(db, student, room_id)
     settings = get_settings()
@@ -95,7 +118,8 @@ async def create_document(
     existing = await _find_by_digest(db, room.id, digest)
     if existing is not None:
         logger.info("document %s re-uploaded to room %s, reusing", digest[:12], room.id)
-        return existing
+        # Nothing was added, so nothing needs evicting.
+        return UploadResult(document=existing, evicted=[])
 
     # In a worker thread, because this is the one genuinely CPU-bound thing the
     # app does. Measured: a 4.4 MB text-heavy PDF takes ~3 seconds to parse, and
@@ -110,6 +134,13 @@ async def create_document(
 
     document = Document(
         room_id=room.id,
+        # Set here rather than left to the column's `now()` default, which
+        # Postgres evaluates as *transaction start* — so two files uploaded in one
+        # transaction get identical timestamps, and eviction then picks its victim
+        # by whichever random UUID sorts first. Eviction deletes a student's file,
+        # so the order it walks must come from the data, not from where the
+        # transaction boundaries happen to fall.
+        created_at=datetime.now(UTC),
         filename=detected.filename,
         kind=detected.kind.value,
         size_bytes=detected.size_bytes,
@@ -127,14 +158,45 @@ async def create_document(
     await db.flush()
     await db.refresh(document)
 
+    evicted = await _evict_oldest(db, room.id, keeping=document.id)
+
     logger.info(
-        "indexed %s (%s, %d chunks) into room %s",
+        "indexed %s (%s, %d chunks) into room %s%s",
         detected.filename,
         detected.kind.value,
         len(chunks),
         room.id,
+        f", evicting {evicted}" if evicted else "",
     )
-    return document
+    return UploadResult(document=document, evicted=evicted)
+
+
+async def _evict_oldest(db: AsyncSession, room_id: UUID, *, keeping: UUID) -> list[str]:
+    """Keep the newest `MAX_DOCUMENTS_PER_ROOM` files, drop the rest.
+
+    Oldest-first, by upload time. Least-recently-*used* would be the better rule
+    — a reference uploaded in March and read every week is worth more than one
+    added in June and never opened — but nothing records when a document was last
+    searched, and adding a write on every search to find out is a worse trade
+    than this. Upload order is at least predictable, which is what makes it
+    safe to describe to a student.
+
+    `keeping` guards the obvious accident: a room already at the limit would
+    otherwise be able to evict the very file this request just added.
+    """
+    stmt = (
+        select(Document.id, Document.filename)
+        .where(Document.room_id == room_id, Document.id != keeping)
+        .order_by(Document.created_at.desc(), Document.id)
+        .offset(MAX_DOCUMENTS_PER_ROOM - 1)
+    )
+    doomed = (await db.execute(stmt)).all()
+    if not doomed:
+        return []
+
+    await db.execute(delete(Document).where(Document.id.in_([row.id for row in doomed])))
+    await db.flush()
+    return [row.filename for row in doomed]
 
 
 async def list_documents(db: AsyncSession, student: Student, room_id: UUID) -> list[Document]:
@@ -146,6 +208,39 @@ async def list_documents(db: AsyncSession, student: Student, room_id: UUID) -> l
         .order_by(Document.created_at.desc(), Document.id)
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def describe_materials(db: AsyncSession, room: Room) -> list[str]:
+    """One line per uploaded file, for the tutor prompt.
+
+    This is the fix for a failure that looked like a broken tool and was not.
+    The prompt named no documents at all, so a student who uploaded a slide deck
+    and asked "summarise the thesis" got a general essay about what a thesis is:
+    the model had no way to know a specific one was sitting in the room, and
+    guessed there was nothing to look at. Thirty tokens of filenames turn that
+    guess into a fact.
+
+    Names and sizes only — the contents stay out. Their deck measured 5,843
+    tokens; carrying that on every turn would nearly quadruple the prompt to
+    answer "thanks", and a room with five handouts would not fit at all. The
+    brief's own wording is the tiebreaker: the tutor queries these *as needed*.
+
+    Takes a `Room` rather than an id because the caller has already resolved and
+    authorised it. No query here re-checks ownership, so none can forget to.
+    """
+    stmt = (
+        select(Document.filename, Document.kind, Document.page_count)
+        .where(Document.room_id == room.id)
+        .order_by(Document.created_at.desc(), Document.id)
+    )
+    lines = []
+    for row in (await db.execute(stmt)).all():
+        # "slides" for a deck, "pages" for a PDF, nothing for Word — which has no
+        # page count, because a .docx does not record one.
+        unit = "slides" if row.kind == "pptx" else "pages"
+        size = f" ({row.page_count} {unit})" if row.page_count else ""
+        lines.append(f"{row.filename}{size}")
+    return lines
 
 
 async def delete_document(db: AsyncSession, student: Student, document_id: UUID) -> None:
