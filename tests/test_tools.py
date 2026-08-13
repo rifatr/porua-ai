@@ -26,6 +26,7 @@ settings = get_settings()
 
 CALC = "evaluate_expression"
 HISTORY = "query_study_history"
+SEARCH = "search_room_materials"
 
 
 def use_llm(llm: FakeLLM) -> FakeLLM:
@@ -60,7 +61,7 @@ def all_tool_calls(detail: dict) -> list[dict]:
 
 def test_only_the_declared_tools_exist() -> None:
     """Adding a tool means editing a file, which means it goes through review."""
-    assert set(registry.names()) == {HISTORY, CALC}
+    assert set(registry.names()) == {HISTORY, CALC, SEARCH}
 
 
 def test_an_unknown_name_resolves_to_nothing() -> None:
