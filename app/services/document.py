@@ -30,6 +30,7 @@ cannot tell the difference, which is the point.
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -53,6 +54,10 @@ logger = logging.getLogger(__name__)
 # to support.
 DEFAULT_SEARCH_LIMIT = 5
 MAX_SEARCH_LIMIT = 10
+
+# Words used from a query on the broad pass. A cap so a model that sends a whole
+# paragraph produces a bounded tsquery rather than one OR term per word.
+MAX_QUERY_TERMS = 12
 
 
 @dataclass(frozen=True)
@@ -176,13 +181,49 @@ async def search(
     if not text:
         return []
 
-    # `websearch_to_tsquery` rather than `to_tsquery`, because this string comes
-    # from a language model. `to_tsquery` demands operator syntax and raises on
-    # anything else, so `photosynthesis and light` would be a 500. The websearch
-    # form takes plain language, understands quoted phrases and `-excluded`, and
-    # never raises on input it does not understand.
-    tsquery = func.websearch_to_tsquery(SEARCH_CONFIG, text)
+    limit = min(limit, MAX_SEARCH_LIMIT)
 
+    # Every term must appear. Precise, and it respects quoted phrases and
+    # `-excluded` terms, so it is the right first attempt.
+    hits = await _run(db, room, func.websearch_to_tsquery(SEARCH_CONFIG, text), limit)
+    if hits:
+        return hits
+
+    # Nothing matched every term, so try for any of them. This is not a nicety —
+    # the query is written by a language model, in natural language, and
+    # `websearch_to_tsquery` joins terms with AND:
+    #
+    #     'protections prevent arbitrary tool calls'
+    #       -> 'protect' & 'prevent' & 'arbitrari' & 'tool' & 'call'
+    #
+    # The document said "protections" and "arbitrary" but never "prevent", so one
+    # ordinary English word the model chose reduced five good matches to none.
+    # Strict-then-broad keeps the precision when the terms really are all there
+    # and degrades to ranked relevance when they are not, instead of degrading to
+    # silence — which the model reads as "your materials do not cover this" and
+    # answers from general knowledge, confidently and without your handout.
+    relaxed = _any_term_query(text)
+    return await _run(db, room, relaxed, limit) if relaxed is not None else []
+
+
+def _any_term_query(text: str):
+    """`a | b | c` — matches a chunk containing any of the words.
+
+    Each word goes through `plainto_tsquery` individually rather than being
+    pasted into a query string, so nothing the model writes can be operator
+    syntax. Stop words reduce to an empty tsquery and drop out harmlessly.
+    """
+    terms = re.findall(r"\w+", text, flags=re.UNICODE)[:MAX_QUERY_TERMS]
+    if not terms:
+        return None
+
+    combined = func.plainto_tsquery(SEARCH_CONFIG, terms[0])
+    for term in terms[1:]:
+        combined = combined.op("||")(func.plainto_tsquery(SEARCH_CONFIG, term))
+    return combined
+
+
+async def _run(db: AsyncSession, room: Room, tsquery, limit: int) -> list[SearchHit]:
     stmt = (
         select(
             Document.id,
@@ -193,13 +234,14 @@ async def search(
         .select_from(DocumentChunk)
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(Document.room_id == room.id, DocumentChunk.tsv.op("@@")(tsquery))
-        # ts_rank scores on how often the terms appear and how close together.
-        # chunk_no breaks ties in document order, so equal scores come back the
-        # same way every time instead of however the planner felt like.
+        # ts_rank scores on how often the terms appear and how close together, so
+        # on the broad pass a chunk matching four of five words outranks one
+        # matching a single common word. chunk_no breaks ties in document order,
+        # so equal scores come back the same way every time instead of however
+        # the planner felt like.
         .order_by(func.ts_rank(DocumentChunk.tsv, tsquery).desc(), DocumentChunk.chunk_no)
-        .limit(min(limit, MAX_SEARCH_LIMIT))
+        .limit(limit)
     )
-
     return [
         SearchHit(
             document_id=row.id,
