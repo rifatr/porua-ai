@@ -26,9 +26,15 @@ class Settings(BaseSettings):
 
     # --- Limits (PLAN.md section 7) ---
     max_upload_bytes: int = 20 * 1024 * 1024
+    # The student is waiting synchronously, so this is the outer bound on the
+    # whole turn — every other budget must fit inside it.
     turn_deadline_seconds: int = 45
     tool_timeout_seconds: int = 8
+    # Individual tool runs allowed per turn.
     max_tool_calls_per_turn: int = 6
+    # Rounds of "call the model, it asks for tools, run them, call again". When
+    # this runs out the tools are simply not offered on the next call, so the
+    # model has to answer with what it already has rather than the turn failing.
     max_agent_iterations: int = 5
 
     # --- Reliability (PLAN.md section 9) ---
@@ -39,9 +45,11 @@ class Settings(BaseSettings):
     max_network_retries: int = 2
     max_repair_attempts: int = 2
     retry_base_delay_seconds: float = 0.5
-    # Backstop over both budgets, so no combination of them can run away. Nothing
-    # should ever reach it; if a turn does, that is a bug worth seeing in the data.
-    max_attempts_per_turn: int = 6
+    # Backstop over every budget, so no combination of them can run away. The
+    # worst legal case is 1 first call + 5 tool rounds + 2 retries + 2 repairs =
+    # 10, so this is never reached in practice; if a turn does reach it, that is a
+    # bug worth seeing in the data rather than an unbounded loop.
+    max_attempts_per_turn: int = 12
 
     # --- Paging ---
     default_page_size: int = 20

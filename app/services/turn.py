@@ -31,23 +31,52 @@ on any individual call, so the cost that matters is the total.
 `ResponseBlocked` — a safety refusal. Retrying nondeterministic failures is
 sensible; retrying a decision is not. The same prompt will be refused again, so
 the only thing a retry buys is a slower failure.
+
+## Tools, and the four budgets
+
+From S4 the same loop also runs tools. A response either asks for tools or answers;
+if it asks, we run them, append the results, and go round again without consuming a
+repair — nothing was *wrong* with that response, it simply was not an answer yet.
+
+Four budgets bound it, and they are separate because they fail for different
+reasons:
+
+| Budget | Counts | Default |
+|---|---|---|
+| `max_agent_iterations` | rounds of ask-run-ask | 5 |
+| `max_tool_calls_per_turn` | individual tool runs | 6 |
+| `max_network_retries` | provider errors | 2 |
+| `max_repair_attempts` | unusable answers | 2 |
+
+Over all of them sits `turn_deadline_seconds`, checked at the top of every
+iteration, because a student waiting synchronously would rather have an error at
+45 seconds than an answer at three minutes.
+
+When the tool budgets run out the tools stop being *offered* rather than the turn
+failing. The model then has to answer with what it already gathered, which is
+almost always possible and is a far better outcome than an error.
 """
 
 import asyncio
+import json
 import logging
 import random
+import time
 from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.errors import NotFoundError
 from app.api.pagination import apply_cursor
 from app.config import Settings, get_settings
 from app.llm import EmptyResponse, LLMClient, LLMError, LLMRequest, ProviderUnavailable
+from app.llm.base import ToolInvocation, ToolResult
 from app.models.room import Room
 from app.models.student import Student
+from app.models.tool_call import ToolCall
 from app.models.turn import Turn, TurnFailureReason, TurnStatus
 from app.models.turn_attempt import AttemptPurpose, TurnAttempt
 from app.prompts.loader import Prompt, load_prompt
@@ -55,11 +84,14 @@ from app.reliability.failures import ResponseInvalid
 from app.reliability.pipeline import validate_tutor_response
 from app.schemas.tutor import TutorAnswer
 from app.services import room as room_service
+from app.tools import registry as tool_registry
+from app.tools.base import ToolContext, ToolFailure, ToolStatus
+from app.tools.registry import InvalidArguments
 
 logger = logging.getLogger(__name__)
 
 TUTOR_PROMPT = "tutor_system"
-TUTOR_PROMPT_VERSION = 2
+TUTOR_PROMPT_VERSION = 3
 REPAIR_PROMPT = "tutor_repair"
 REPAIR_PROMPT_VERSION = 1
 
@@ -156,6 +188,157 @@ async def _fail(db: AsyncSession, turn: Turn, reason: TurnFailureReason) -> Turn
     return turn
 
 
+def _cache_key(invocation: ToolInvocation) -> str:
+    """Identity of a tool call: its name and its arguments, order-insensitive.
+
+    `sort_keys` matters — the model can emit the same two arguments in either
+    order, and without it the cache would miss and the repeat would be paid for.
+    """
+    return (
+        f"{invocation.name}"
+        f"({json.dumps(invocation.arguments, sort_keys=True, default=str)})"
+    )
+
+
+async def _run_tool(
+    db: AsyncSession,
+    attempt: TurnAttempt,
+    call_no: int,
+    invocation: ToolInvocation,
+    context: ToolContext,
+    cache: dict[str, dict],
+    settings: Settings,
+    *,
+    over_budget: bool,
+) -> tuple[ToolResult, bool]:
+    """Run one requested tool and record it, whatever happens.
+
+    Returns what to send back to the model, and whether the turn must stop.
+
+    Every branch below writes a `tool_calls` row, including the branches where
+    nothing runs. A request for a tool that does not exist is exactly the evidence
+    that the fixed registry works, and it would be invisible if only successful
+    calls were stored.
+
+    A result always comes back, even for a rejected call. Function calling is a
+    conversation: leaving a call unanswered makes the next request malformed, so
+    "no" has to be said out loud rather than by silence.
+    """
+    row = ToolCall(
+        attempt_id=attempt.id,
+        call_no=call_no,
+        tool_name=invocation.name,
+        # Stored before validation, so a rejected call still shows what was asked.
+        arguments=invocation.arguments,
+        started_at=datetime.now(UTC),
+        status=ToolStatus.OK.value,
+    )
+
+    def finish(
+        status: ToolStatus, *, result: dict | None = None, error: str | None = None
+    ) -> ToolResult:
+        """Complete the row, then add it. Both halves matter.
+
+        The row is added here rather than up front because a tool may query the
+        database, and SQLAlchemy autoflushes pending objects before a query. An
+        unfinished row flushed mid-call has status `ok` and no result yet, which
+        violates `tool_calls_explain_themselves` — the constraint found this the
+        first time `query_study_history` ran. Adding a complete row instead means
+        there is never a half-written one to flush.
+
+        This is the opposite of `turn_attempts`, which *is* written before its
+        call. The difference is what a crash would cost: an attempt holds the
+        prompt, which is unrecoverable, while everything about a tool call is
+        already known from the attempt that requested it.
+        """
+        row.status = status.value
+        row.result = result
+        row.error_detail = error
+        row.finished_at = datetime.now(UTC)
+        db.add(row)
+        return ToolResult(name=invocation.name, content=result or {"error": error})
+
+    # Protection 4b: the per-turn budget. Checked before anything else, because a
+    # spent budget means nothing runs regardless of what was asked for.
+    if over_budget:
+        return (
+            finish(
+                ToolStatus.FAILED,
+                error=(
+                    f"Tool budget spent: {settings.max_tool_calls_per_turn} calls "
+                    f"is the limit for one turn. Answer with what you already have."
+                ),
+            ),
+            False,
+        )
+
+    # Protection 5: the same call twice. The limits would end a loop eventually;
+    # this ends it now, and tells the model why so it stops rather than varying
+    # the arguments slightly and trying again.
+    key = _cache_key(invocation)
+    if key in cache:
+        repeated = cache[key] | {
+            "note": (
+                "You already called this with these arguments. This is the same "
+                "result. Do not call it again — answer the student now."
+            )
+        }
+        logger.info("tool %s repeated on turn attempt %s", invocation.name, attempt.id)
+        return finish(ToolStatus.OK, result=repeated), False
+
+    # Protection 1: the fixed registry. A miss returns None; there is no fallback
+    # that could turn an arbitrary string into something callable.
+    tool = tool_registry.resolve(invocation.name)
+    if tool is None:
+        return (
+            finish(
+                ToolStatus.UNKNOWN_TOOL,
+                error=(
+                    f"There is no tool called {invocation.name!r}. "
+                    f"Available: {', '.join(tool_registry.names())}."
+                ),
+            ),
+            False,
+        )
+
+    # Protection 2: arguments become a checked object or the tool never runs.
+    try:
+        args = tool_registry.validate_arguments(tool, invocation.arguments)
+    except InvalidArguments as exc:
+        return finish(ToolStatus.INVALID_ARGUMENTS, error=exc.detail), False
+
+    # Protection 4a: the per-tool timeout.
+    try:
+        result = await asyncio.wait_for(
+            tool.run(args, context), timeout=settings.tool_timeout_seconds
+        )
+    except TimeoutError:
+        # The turn stops here. `wait_for` cancels the coroutine, and a database
+        # query cancelled mid-flight leaves the session in a state we should not
+        # keep writing through. Failing loudly beats a turn built on a connection
+        # of unknown health.
+        return (
+            finish(
+                ToolStatus.TIMED_OUT,
+                error=f"{invocation.name} exceeded {settings.tool_timeout_seconds}s.",
+            ),
+            True,
+        )
+    except ToolFailure as exc:
+        # The tool understood the request and refused it — a bad expression, an
+        # impossible range. Not our bug, and the model can act on the reason.
+        return finish(ToolStatus.FAILED, error=exc.detail), False
+    except Exception as exc:  # noqa: BLE001 - a tool bug must not break the turn
+        logger.exception("tool %s raised", invocation.name)
+        return (
+            finish(ToolStatus.FAILED, error=f"The tool failed: {type(exc).__name__}."),
+            False,
+        )
+
+    cache[key] = result
+    return finish(ToolStatus.OK, result=result), False
+
+
 async def create_turn(
     db: AsyncSession,
     student: Student,
@@ -166,6 +349,9 @@ async def create_turn(
     """Ask the tutor a question, check the reply, and record every step."""
     room = await room_service.get_room(db, student, room_id)
     settings = get_settings()
+    # One clock over everything. Every other budget sits inside it, so a turn
+    # cannot creep past the point where the student would rather have an error.
+    deadline = time.monotonic() + settings.turn_deadline_seconds
 
     turn = Turn(
         room_id=room.id,
@@ -179,6 +365,10 @@ async def create_turn(
     tutor = load_prompt(TUTOR_PROMPT, TUTOR_PROMPT_VERSION)
     repair = load_prompt(REPAIR_PROMPT, REPAIR_PROMPT_VERSION)
 
+    # Protection 3: identity, fixed here, from the request. No tool takes a
+    # student id, so the model has no way to reach another student's data.
+    context = ToolContext(db=db, student=student, room=room)
+
     prompt: Prompt = tutor
     purpose = AttemptPurpose.TUTOR
     rendered = tutor.render(
@@ -188,25 +378,45 @@ async def create_turn(
         student_message=message,
     )
 
+    exchanges: tuple[tuple[ToolInvocation, ToolResult], ...] = ()
+    tool_cache: dict[str, dict] = {}
+
     retries_left = settings.max_network_retries
     repairs_left = settings.max_repair_attempts
+    tool_calls_left = settings.max_tool_calls_per_turn
+    rounds_left = settings.max_agent_iterations
     retry_number = 0
+    call_no = 0
 
-    # A bounded loop rather than `while True`. With the default budgets the
-    # ceiling is unreachable — one first call plus two retries plus two repairs is
-    # five — but the bound is structural, so the loop terminates even if the two
-    # budgets are later raised without anyone rechecking the arithmetic.
+    # A bounded loop rather than `while True`. Every budget below bites long
+    # before this ceiling, but the bound is structural, so the loop terminates
+    # even if the budgets are later raised without anyone rechecking the sum.
     for attempt_no in range(1, settings.max_attempts_per_turn + 1):
+        if time.monotonic() > deadline:
+            return await _fail(db, turn, TurnFailureReason.TURN_DEADLINE_EXCEEDED)
+
+        # Tools are offered only while gathering, and only while both budgets
+        # hold. When they run out the tools simply stop being offered, so the
+        # model has to answer with what it has — the turn narrows rather than
+        # failing, which is a better outcome for a student who is waiting.
+        offer_tools = (
+            purpose is AttemptPurpose.TUTOR and rounds_left > 0 and tool_calls_left > 0
+        )
+
         request = LLMRequest(
             prompt=rendered,
             model=settings.gemini_model,
             temperature=prompt.temperature,
-            # Both the tutor prompt and the repair prompt ask for this same shape,
-            # so both calls are constrained by it. The parse and schema layers still
-            # run: a provider is free to ignore the field, and constrained decoding
-            # says nothing about whether the answer is any *good*, which is the half
-            # of the pipeline that matters most.
-            response_schema=TutorAnswer,
+            tools=tool_registry.specs() if offer_tools else (),
+            tool_exchanges=exchanges,
+            # Mutually exclusive with tools — the provider rejects both together
+            # (400, "Function calling with a response mime type ... is
+            # unsupported"). So constrained decoding is unavailable exactly while
+            # the model can call tools, and the parse/schema/content layers are
+            # the only thing standing between that output and the student. Far
+            # from making the pipeline redundant, `response_schema` leaves it
+            # carrying the whole load for most of a tool-using turn.
+            response_schema=None if offer_tools else TutorAnswer,
         )
         attempt = TurnAttempt(
             turn_id=turn.id,
@@ -244,6 +454,37 @@ async def create_turn(
             output_tokens=response.output_tokens,
             thought_tokens=response.thought_tokens,
         )
+
+        # --- tools ------------------------------------------------------------
+        if response.tool_calls:
+            rounds_left -= 1
+
+            for invocation in response.tool_calls:
+                call_no += 1
+                result, must_stop = await _run_tool(
+                    db,
+                    attempt,
+                    call_no,
+                    invocation,
+                    context,
+                    tool_cache,
+                    settings,
+                    over_budget=tool_calls_left <= 0,
+                )
+                # Appended even when the call was refused. The model has to see a
+                # response for every request it made, or the next call is
+                # malformed — and it needs to read *why* to stop asking.
+                exchanges += ((invocation, result),)
+                tool_calls_left -= 1
+
+                if must_stop:
+                    await db.flush()
+                    return await _fail(db, turn, TurnFailureReason.TOOL_TIMED_OUT)
+
+            await db.flush()
+            # Round the loop with the results in hand. No repair is consumed —
+            # nothing was wrong with the response, it just was not an answer yet.
+            continue
 
         # --- the checks -------------------------------------------------------
         try:
@@ -326,9 +567,12 @@ async def get_turn(db: AsyncSession, student: Student, turn_id: UUID) -> Turn:
         select(Turn)
         .join(Room, Turn.room_id == Room.id)
         .where(Turn.id == turn_id, Room.student_id == student.id)
+        # Loaded up front, in two extra queries rather than one per attempt. Lazy
+        # loading is not merely slow here — it raises under asyncio, because the
+        # implicit IO happens outside an await.
+        .options(selectinload(Turn.attempts).selectinload(TurnAttempt.tool_calls))
     )
     turn = (await db.execute(stmt)).scalar_one_or_none()
     if turn is None:
         raise NotFoundError(f"No turn with id {turn_id}.")
-    await db.refresh(turn, attribute_names=["attempts"])
     return turn
