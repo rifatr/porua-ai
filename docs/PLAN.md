@@ -451,6 +451,33 @@ upload -> check the file -> save it -> extract text -> split into chunks -> inde
 with `%PDF`. Word and PowerPoint files are zip archives and start with `PK`. So a `.txt` renamed
 to `.pdf` gets caught. Size limit is 20 MB.
 
+> **Built, with one thing stated more precisely than it is above.** Because `.docx` and `.pptx`
+> share the `PK` signature, the magic bytes prove a file is a ZIP and cannot prove which Office
+> format it holds. A PowerPoint named `.docx` is therefore caught by the extractor, as
+> `CORRUPT_ARCHIVE`, not by detection. Worth saying plainly rather than implying the check is
+> stronger than it is.
+
+**Processing is synchronous — decided during S5, against the sketch above.** Reading, chunking and
+indexing all happen inside the upload request. The reason is this section's own list of bad-file
+cases: most of them are only *discovered* during extraction, and in a background task each one
+becomes a status field a client must poll and interpret rather than an HTTP status with a code.
+
+Measured cost, since guessing at this would be worthless: a text-heavy PDF parses at about 1.5 MB
+per second, so 4.4 MB takes ~3 seconds and a 20 MB worst case around 14. Parsing therefore runs in
+a worker thread — it is the one genuinely CPU-bound thing in the app, and left on the event loop it
+would stall every other request for that whole time. The trade would flip at 500 MB, and the note
+in `app/services/document.py` says what would change.
+
+**Tokens are not part of this cost.** Extraction, chunking and indexing never touch the model. The
+same measurement put a 4.4 MB textbook at 1.45 M tokens and one search result at 1,322 — so putting
+a document in the prompt would cost roughly 1,100× more per turn, and would not fit in the 1 M
+context window anyway. Retrieval is not a saving here, it is the only thing that works.
+
+Two consequences follow. There is no `status` column — a row exists only if the file was read, so
+its existence is the status, and a field nothing ever sets to `failed` would be dead weight. And
+the original bytes are not stored: nothing reads them back, so keeping them would mean a volume or
+object store with no reader.
+
 **Extracting text.** PDF gives text plus page numbers. Word gives paragraphs, headings and table
 cells. PowerPoint gives each slide's text, its tables, and the speaker notes.
 
@@ -463,11 +490,27 @@ back to the exact place.
 
 **Handling bad files.** Each gets a clear reason and the right HTTP code — never a 500:
 
-`UNSUPPORTED_TYPE` (415) · `FILE_TOO_LARGE` (413) · `CORRUPT_ARCHIVE` · `ENCRYPTED` ·
-`NO_TEXT_LAYER` (a scanned PDF that is really just images) · `EMPTY_EXTRACTION` (opens fine, has
-no text).
+`UNSUPPORTED_TYPE` (415) · `FILE_TOO_LARGE` (413) · `CORRUPT_ARCHIVE` (422) · `ENCRYPTED` (422) ·
+`NO_TEXT_LAYER` (422 — a scanned PDF that is really just images) · `EMPTY_EXTRACTION` (422 — opens
+fine, has no text) · `UNDECODABLE_TEXT` (422 — added during S5, below).
 
-A failed upload must end as `failed` with a reason, not sit at `processing` forever.
+**`UNDECODABLE_TEXT` was not on this list until a real file produced a 500.** Some PDFs embed fonts
+with no `ToUnicode` map, so nothing can map a glyph back to a character and the extractor returns
+raw font indices — `\x00\x02\x01\x04\x03`. Postgres cannot store `\x00` in a `text` column, so the
+insert failed and the request became a 500, which is precisely the outcome this section exists to
+prevent. Fixed in two places, because they are two different problems: extracted text is now
+stripped of characters that cannot survive the database, and a document that is *mostly* such
+characters is refused rather than indexed as noise. Worth remembering as a lesson — the list of
+bad-file cases was written from imagination, and the case that actually broke it was not on the
+list.
+
+A failed upload must end with a reason, never as a 500 and never in limbo. Synchronous processing
+delivers that directly: the reason is the response. `NO_TEXT_LAYER` and `EMPTY_EXTRACTION` are kept
+apart even though both mean "no text came out", because the student's next move differs — one needs
+a different copy of the file, the other means there was never anything in it.
+
+**Feature 37 (heading-aware chunking) was not built.** It is P2, and the P0 work in S6 was worth
+more than better chunk boundaries. Chunks split on a word budget within a page instead.
 
 **Known limits, written down rather than hidden:** `python-docx` cannot read headers, footers or
 text boxes. PowerPoint SmartArt is not extracted. PDFs with two columns can come out interleaved.
@@ -726,7 +769,8 @@ change your mind. Writing it on Saturday from memory does not work.
 | Web UI | Optional in the brief. The time goes into the reliability tests instead. |
 | Login / auth | Explicitly excluded. We still model students, so auth could be added without changing the schema. |
 | Celery / Redis job queue | One `docker compose up` is better than an extra service. File processing uses FastAPI background tasks with a status column, so a real queue could replace it later in one module. |
-| OCR for scanned PDFs | Rejecting them clearly *is* the deliberate handling they asked for. Silently saving an empty document is the real failure. |
+| OCR for scanned and undecodable PDFs | Rejecting them clearly *is* the deliberate handling they asked for. Silently saving an empty document is the real failure. Two file kinds land here — a scan (`NO_TEXT_LAYER`) and a PDF whose fonts record shapes rather than characters (`UNDECODABLE_TEXT`) — and both are pictures of text, so one OCR path serves both: render each page with PyMuPDF, read the image, store chunks exactly as now. Of the three ways to read it, **Gemini vision** is the one to build: the brief fixes the model and we already hold the key, so it adds no service, no image weight and no second vendor, and unlike Tesseract it is actually good at maths notation and Bangla. Cost is a one-off ~1k tokens per page at upload, not per turn. The real blocker is latency, not quality — OCR is slow enough that it forces upload into a background job with a status column, which is the exact point at which synchronous processing stops paying. That is a change to the shape of the feature, not an addition to it, which is why it waits. |
+| More document formats | `.doc` (old binary Word — needs a converter, not a parser), `.odt`, `.rtf`, `.txt`, `.md`, `.epub`. Also the gaps inside formats we do accept: `python-docx` cannot reach headers, footers or text boxes, PowerPoint SmartArt is a drawing, and two-column PDFs can interleave. None of this needs OCR — it needs more extractors behind the same `Page` interface, which is why extraction is one function per format returning a shared shape. Left out because three formats cover what the brief names, and each new one is a new set of bad-file cases to get right rather than a line in a dispatch table. |
 | Streaming replies (SSE) | Streaming would hide the repair loop, which is the interesting part. |
 | Vector / embedding search | "Fixed model" is read as applying to the chat model. Text search is enough here and needs no second model. The search code sits behind an interface so embeddings could drop in later. |
 | Code execution sandbox | The best tool we are not building, and the first thing to add with more time. `evaluate_expression` covers the subset that can be *proved* safe — an AST allow-list over expressions. Going further needs an isolated container, no network, memory and PID limits, a hard timeout, and cleanup that survives a hang. That is a service, not a function. A large probably-safe sandbox is worth less than a small provably-safe one, and would hand the reviewer a hole to poke. |
