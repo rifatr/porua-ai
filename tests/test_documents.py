@@ -23,7 +23,7 @@ from app.documents.extract import (
 from app.models.room import Room
 from app.models.student import Student
 from app.services import document as document_service
-from app.services.document import SearchHit
+from app.services.document import MAX_DOCUMENTS_PER_ROOM, SearchHit
 from app.tools.base import ToolContext
 from app.tools.registry import resolve, validate_arguments
 from tests import documents as make
@@ -408,6 +408,106 @@ async def test_another_students_document_cannot_be_deleted(
         f"/documents/{body['id']}", headers={"X-Student-Id": str(intruder.id)}
     )
     assert response.status_code == 404
+
+
+# --- the per-room limit -----------------------------------------------------
+
+
+async def test_the_oldest_file_is_evicted_rather_than_the_upload_refused(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    """A student part-way through studying should not hit a wall. The file they
+    are reaching for now matters more than one from last term."""
+    room = await add_room(db, student)
+    for index in range(MAX_DOCUMENTS_PER_ROOM):
+        status, _ = await upload(
+            client, auth, room, f"note{index}.pdf", make.pdf([f"Note number {index}."])
+        )
+        assert status == 201
+
+    status, body = await upload(
+        client, auth, room, "newest.pdf", make.pdf(["The newest note."])
+    )
+
+    assert status == 201, "the upload must not be refused"
+    assert body["evicted"] == ["note0.pdf"], "the oldest should go, and be named"
+
+    listed = (await client.get(f"/rooms/{room.id}/documents", headers=auth)).json()
+    assert len(listed) == MAX_DOCUMENTS_PER_ROOM
+    assert "note0.pdf" not in {d["filename"] for d in listed}
+    assert "newest.pdf" in {d["filename"] for d in listed}
+
+
+async def test_a_full_room_does_not_evict_the_file_just_added(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    """The obvious way to get this wrong: count the room after inserting, drop
+    the oldest, and find the new file was the one dropped in some ordering."""
+    room = await add_room(db, student)
+    for index in range(MAX_DOCUMENTS_PER_ROOM + 3):
+        await upload(client, auth, room, f"n{index}.pdf", make.pdf([f"Note {index}."]))
+
+    hits = await run_search(db, room, f"Note {MAX_DOCUMENTS_PER_ROOM + 2}")
+    assert hits, "the most recent upload must still be searchable"
+
+
+async def test_an_ordinary_upload_evicts_nothing(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    room = await add_room(db, student)
+    _, body = await upload(client, auth, room, "one.pdf", make.pdf(["Only file."]))
+    assert body["evicted"] == []
+
+
+async def test_evicted_material_stops_being_searchable(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    """Eviction has to reach the chunks too, or the tutor keeps citing a file the
+    student can no longer see in the room."""
+    room = await add_room(db, student)
+    await upload(client, auth, room, "first.pdf", make.pdf(["Xenon is a noble gas."]))
+    assert await run_search(db, room, "xenon")
+
+    for index in range(MAX_DOCUMENTS_PER_ROOM):
+        await upload(client, auth, room, f"f{index}.pdf", make.pdf([f"Filler {index}."]))
+
+    assert await run_search(db, room, "xenon") == []
+
+
+# --- what the tutor is told the room contains -------------------------------
+
+
+async def test_materials_are_described_for_the_prompt(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    """The line that stops the model guessing the room is empty.
+
+    Without it a student who uploaded a slide deck and asked "summarise the
+    thesis" got a general essay about what a thesis is — the model had no way to
+    know a specific one was in the room.
+    """
+    room = await add_room(db, student)
+    await upload(client, auth, room, "slides.pptx", make.pptx([("Mitosis", "Stages")]))
+    await upload(client, auth, room, "handout.pdf", make.pdf(["One.", "Two."]))
+    await upload(client, auth, room, "notes.docx", make.docx(["Some notes."]))
+
+    described = await document_service.describe_materials(db, room)
+
+    # Newest first, sized in the unit the format actually has.
+    assert described == [
+        "notes.docx",  # Word has no page count to report
+        "handout.pdf (2 pages)",
+        "slides.pptx (1 slides)",
+    ]
+
+
+async def test_an_empty_room_describes_nothing(
+    db: AsyncSession, student: Student
+) -> None:
+    """So the prompt omits the section entirely rather than announcing a heading
+    with nothing under it."""
+    room = await add_room(db, student)
+    assert await document_service.describe_materials(db, room) == []
 
 
 # --- text that is not text --------------------------------------------------
