@@ -60,7 +60,6 @@ almost always possible and is a far better outcome than an error.
 import asyncio
 import json
 import logging
-import random
 import time
 from datetime import UTC, datetime
 from uuid import UUID
@@ -72,9 +71,11 @@ from sqlalchemy.orm import selectinload
 from app.api.errors import NotFoundError
 from app.api.pagination import apply_cursor
 from app.config import Settings, get_settings
-from app.llm import EmptyResponse, LLMClient, LLMError, LLMRequest, ProviderUnavailable
+from app.llm import LLMClient, LLMError, LLMRequest
 from app.llm.base import ToolInvocation, ToolResult
+from app.llm.retry import RETRIABLE, backoff
 from app.models.room import Room
+from app.models.skill_run import QuizQuestion, SkillRun
 from app.models.student import Student
 from app.models.tool_call import ToolCall
 from app.models.turn import Turn, TurnFailureReason, TurnStatus
@@ -101,10 +102,9 @@ TUTOR_PROMPT_VERSION = 6
 REPAIR_PROMPT = "tutor_repair"
 REPAIR_PROMPT_VERSION = 1
 
-# Worth retrying because it may come out differently next time. A rate limit
-# passes; an empty response usually means gemini-2.5-flash spent its whole output
-# budget thinking, and how much it thinks varies run to run at temperature > 0.
-RETRIABLE = (ProviderUnavailable, EmptyResponse)
+# `RETRIABLE` and `backoff` are imported from app/llm/retry.py — they moved there
+# when the skill loop needed the same decision, and see that module for why the
+# set is what it is.
 
 # How many earlier turns are replayed into the prompt.
 #
@@ -116,7 +116,7 @@ RETRIABLE = (ProviderUnavailable, EmptyResponse)
 CONTEXT_TURN_COUNT = 6
 
 
-async def _next_seq(db: AsyncSession, room: Room) -> int:
+async def next_seq(db: AsyncSession, room: Room) -> int:
     """Next turn number for this room.
 
     A UNIQUE(room_id, seq) constraint backs this up. If two requests for the same
@@ -150,22 +150,6 @@ async def _recent_turns(db: AsyncSession, room: Room) -> list[Turn]:
     )
     rows = list((await db.execute(stmt)).scalars().all())
     return list(reversed(rows))
-
-
-async def _backoff(settings: Settings, retry_number: int) -> None:
-    """Wait before re-sending, longer each time, with jitter.
-
-    Growing the gap gives an overloaded provider room to recover instead of being
-    hit again immediately. The random part matters when several requests fail at
-    once: without it they would all wake at the same instant and rate-limit each
-    other again, which is the thundering-herd problem.
-    """
-    base = settings.retry_base_delay_seconds
-    if base <= 0:  # tests set this to 0 so the suite does not sleep
-        return
-    delay = base * (2**retry_number) * (0.5 + random.random())
-    logger.info("backing off %.2fs before retry %d", delay, retry_number)
-    await asyncio.sleep(delay)
 
 
 def _finish_attempt(attempt: TurnAttempt, **fields) -> None:
@@ -360,7 +344,7 @@ async def create_turn(
 
     turn = Turn(
         room_id=room.id,
-        seq=await _next_seq(db, room),
+        seq=await next_seq(db, room),
         student_message=message,
         status=TurnStatus.RUNNING.value,
     )
@@ -450,7 +434,7 @@ async def create_turn(
             _finish_attempt(attempt, error_type=exc.error_type, error_detail=exc.detail)
             if isinstance(exc, RETRIABLE) and retries_left > 0:
                 retries_left -= 1
-                await _backoff(settings, retry_number)
+                await backoff(settings, retry_number)
                 retry_number += 1
                 continue  # same prompt, same purpose — nothing about it was wrong
             return await _fail(db, turn, TurnFailureReason(exc.error_type))
@@ -579,7 +563,15 @@ async def get_turn(db: AsyncSession, student: Student, turn_id: UUID) -> Turn:
         # Loaded up front, in two extra queries rather than one per attempt. Lazy
         # loading is not merely slow here — it raises under asyncio, because the
         # implicit IO happens outside an await.
-        .options(selectinload(Turn.attempts).selectinload(TurnAttempt.tool_calls))
+        .options(
+            selectinload(Turn.attempts).selectinload(TurnAttempt.tool_calls),
+            # Eager, because the inspection view reads it and a lazy load there
+            # would happen inside response serialisation, where async SQLAlchemy
+            # cannot run one.
+            selectinload(Turn.skill_run).selectinload(SkillRun.questions).selectinload(
+                QuizQuestion.choices
+            ),
+        )
     )
     turn = (await db.execute(stmt)).scalar_one_or_none()
     if turn is None:
