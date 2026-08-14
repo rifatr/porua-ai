@@ -58,8 +58,11 @@ async def upload_document(
     room_id: UUID,
     db: DbSession,
     student: CurrentStudent,
-    file: Annotated[UploadFile, File(description="The document to index. Supported file types: pdf, pptx and docx.")],
-) -> DocumentRead:
+    file: Annotated[
+        UploadFile,
+        File(description=f"The document to index. Supported file types: {_EXTENSIONS}."),
+    ],
+) -> DocumentUploadRead:
     # Read at most one byte past the limit. The body has already been received by
     # this point — bounding it for real needs a limit on the server or proxy in
     # front — but this keeps an oversized upload from being held in memory while
