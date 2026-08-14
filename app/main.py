@@ -4,6 +4,7 @@ Run it with:  uvicorn app.main:app --reload
 Swagger UI:   http://localhost:8000/docs
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,6 +15,19 @@ from app.config import get_settings
 from app.db.session import engine
 
 settings = get_settings()
+
+# Without this the root logger sits at its WARNING default and every
+# `logger.info` in the project is discarded — so the record of which document was
+# indexed, which turn was repaired and which tool was cached existed in the code
+# and nowhere else. `LOG_LEVEL` was a setting nothing read.
+#
+# `force=True` because uvicorn installs its own handlers first; without it this
+# call is a no-op and the symptom is unchanged.
+logging.basicConfig(
+    level=settings.log_level.upper(),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    force=True,
+)
 
 
 @asynccontextmanager
