@@ -777,6 +777,16 @@ The run fails with `CHECKS_FAILED` and keeps every attempt and every verdict.
 Then volunteer the plan change: dropping bad questions would leave a quiz of the
 wrong length, which is one of the four named failures, so failing whole is correct.
 
+**"Why does the response contain the answers?"**
+Because nothing takes the quiz yet — there is no submission endpoint and no
+`quiz_attempts` table, so the only consumer is someone inspecting what was
+generated, and for them `is_correct` is the evidence that the checks and the
+shuffle worked. Then say what is actually wrong with it: the shape has no room for
+grading, because the key sits on the same object as the option text. Grading is
+`POST /quiz-runs/{turn_id}/answers`, a run response that withholds `is_correct` and
+`explanation` until then, and an attempts table — which is the point where a quiz
+stops being a document and becomes data you can ask questions of.
+
 **"What's the weakest part of this?"**
 Three, in order. The repair prompt does not show the model its own rejected output,
 so it regenerates rather than repairs — and the tutor already does this properly in
