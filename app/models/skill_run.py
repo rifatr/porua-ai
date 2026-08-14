@@ -151,6 +151,9 @@ class QuizQuestion(UUIDPrimaryKey, Base):
     )
 
     position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # The assessment term for what a student reads before the options. Not
+    # `text` — that is an option, on the table below.
     stem: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Why the right answer is right. Shown after answering, which is the part
@@ -201,6 +204,8 @@ class QuizChoice(UUIDPrimaryKey, Base):
         nullable=False,
     )
 
+    # The shuffled slot the student sees, written after `balance_positions` ran —
+    # not the one the model chose.
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     is_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)

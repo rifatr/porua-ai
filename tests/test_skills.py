@@ -335,7 +335,9 @@ async def test_a_quiz_is_built_stored_and_shuffled(
     for stored in body["questions"]:
         assert len(stored["choices"]) == CHOICES_PER_QUESTION
         assert sum(choice["is_correct"] for choice in stored["choices"]) == 1
-        assert [choice["label"] for choice in stored["choices"]] == ["A", "B", "C", "D"]
+        # Contiguous and in order, so a client can render the labels itself.
+        positions = [choice["position"] for choice in stored["choices"]]
+        assert positions == list(range(CHOICES_PER_QUESTION))
 
 
 async def test_a_broken_quiz_is_repaired_rather_than_served(
