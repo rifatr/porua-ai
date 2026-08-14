@@ -95,6 +95,34 @@ def pptx(slides: list[tuple[str, str]], notes: str | None = None) -> bytes:
     return buffer.getvalue()
 
 
+def pptx_with_grouped_shapes() -> bytes:
+    """A slide whose text is inside a group, and inside a group within a group.
+
+    How real decks are built: a diagram and its labels, a callout and its arrow.
+    A group has no text of its own, so iterating only the top-level shapes finds
+    nothing on a slide like this.
+    """
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(
+        Inches(1), Inches(1), Inches(3), Inches(1)
+    ).text_frame.text = "loose text"
+
+    group = slide.shapes.add_group_shape()
+    group.shapes.add_textbox(
+        Inches(1), Inches(3), Inches(3), Inches(1)
+    ).text_frame.text = "grouped text"
+
+    nested = group.shapes.add_group_shape()
+    nested.shapes.add_textbox(
+        Inches(1), Inches(4), Inches(3), Inches(1)
+    ).text_frame.text = "nested text"
+
+    buffer = BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
 def corrupt_zip() -> bytes:
     """Starts with the ZIP signature, so it gets past the magic-byte check, and
     is not a ZIP. This is the case detection cannot catch and extraction must."""
