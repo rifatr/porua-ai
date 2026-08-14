@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # The student is waiting synchronously, so this is the outer bound on the
     # whole turn — every other budget must fit inside it.
     turn_deadline_seconds: int = 45
+    # A ceiling on one call to the provider. Without it we inherit whatever the
+    # SDK defaults to, which means a hung request has no bound we chose — and the
+    # turn deadline below cannot save us, because it is checked between calls and
+    # a call that never returns never reaches the check.
+    llm_request_timeout_seconds: int = 30
+    # A skill makes up to three sequential model calls, so it needs more headroom
+    # than a conversational turn. A separate number rather than a shared one
+    # because the thing being bounded is genuinely different: a student pressing
+    # "quiz me" is waiting for a document, not a reply.
+    skill_deadline_seconds: int = 90
     tool_timeout_seconds: int = 8
     # Individual tool runs allowed per turn.
     max_tool_calls_per_turn: int = 6
