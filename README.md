@@ -497,6 +497,18 @@ absent for an audit trail). And PLAN §11 lists `quiz_repair` as a prompt to wri
 string constant. The fix is two prompt files and threading `previous_output` through
 `skills/base.generate`, which is the shape the tutor already proves works.
 
+**A quiz can be built but not taken.** There is no answer submission and no
+scoring, so `is_correct` and `explanation` ship inside the questions. That is not a
+leak while the only consumer is someone inspecting what was generated — for them
+`is_correct` is the evidence that exactly one option is correct and that the
+shuffle moved it — but it is a shape with no room for the feature it implies.
+Grading is `POST /quiz-runs/{turn_id}/answers` taking `[{question_id, choice_id}]`,
+a run response that withholds the key until then, and a `quiz_attempts` table. The
+table is the interesting part: it is where a quiz stops being a document and
+becomes data, so "what is this student weak at" turns into a query instead of a
+count of what they happened to mention. The inspection endpoint keeps the answers
+regardless — it already shows raw prompts and raw replies.
+
 **Three checks from PLAN §8 are not implemented**: distractors that are reworded copies of the
 answer, every question backed by an uploaded file when the room has one, and language suited to the
 education level. The prompt asks for all three; nothing verifies them.
