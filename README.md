@@ -161,7 +161,7 @@ Every command works either way. Inside Docker, prefix with `docker compose exec 
 ### Tests
 
 ```bash
-pytest                       # all 221
+pytest                       # all 232
 pytest -q                    # quiet
 pytest tests/test_turns.py   # one file
 pytest -k "cursor"           # by name
@@ -720,12 +720,30 @@ Current, honest:
 - **Word files get no page numbers.** A `.docx` does not contain them — page breaks are computed by
   whatever renders the file. So a citation from a Word document names the file and stops there.
   Inventing a number would be worse than omitting one.
-- **`python-docx` cannot see headers, footers or text boxes**, and PowerPoint SmartArt is a drawing
-  rather than text. Content there is lost silently, because the libraries give us no way to know it
-  existed. Two-column PDFs can also come out interleaved.
-- **Search is full-text, not semantic.** Postgres `tsvector` matches words and their stems, so a
-  student asking about "photosynthesis" finds "photosynthesis"; asking about "how plants eat" finds
-  nothing. Embeddings are the fix and would need a second model — see §16 of the plan.
+- **Extraction has gaps, and every one of them is silent.** No error, no warning — just a document
+  that does not contain what the student can see on screen, first noticed when the tutor says the
+  material does not cover something it visibly does. The full list is in `app/documents/extract.py`;
+  the short version:
+
+  | Format | Not extracted |
+  |---|---|
+  | `.docx` | headers, footers, text boxes, footnotes, endnotes, comments, chart data |
+  | `.pptx` | SmartArt, chart data, WordArt, images |
+  | `.pdf` | images, and formulas or figures rendered as images; two-column layouts can interleave |
+
+  The Word row is the one that bites. A cover page's date, course code or supervisor is very often
+  in a footer, and none of it reaches us — which is a plausible reason a real thesis progress report
+  uploaded during testing had no findable submission date. Text inside **grouped** PowerPoint shapes
+  *was* being dropped too, found by testing rather than reading: a group is a shape holding shapes
+  and has no text of its own, so iterating the top level lost whole labelled diagrams. That one is
+  fixed, with a test covering nested groups.
+- **Search is full-text, not semantic**, and the sharpest way to see the limit is a real failure:
+  asked for a report's submission date, the tutor answered honestly that it could not find one. The
+  date was there, on slide 1, reading `AUGUST 2026`. The query terms were *report, summary,
+  submission, date* — and **a date does not contain the word "date"**. No ranking change fixes that;
+  lexical search matches words and has no concept that `AUGUST 2026` *is* a date. The same applies
+  to "how plants eat" versus "photosynthesis". Embeddings are the fix and need a second model — see
+  §16 of the plan.
 - **The original file is not kept.** We store its SHA-256, name, size and extracted text. Nothing
   reads the bytes back, so keeping them would mean a volume or object store with no reader.
 - **The tool timeout cannot interrupt CPU-bound work.** `asyncio.wait_for` cancels at an
@@ -869,20 +887,45 @@ In priority order:
    change that finally forces upload into a background job with a status column — the trade-off
    `app/services/document.py` already names as the point where synchronous processing stops paying.
 
+   *Content we hold and do not read* — the silent gaps listed under [known
+   limitations](#known-limitations). Word headers, footers, text boxes and footnotes are the ones
+   worth doing first, because a cover page's date and course code live there and a student
+   reasonably expects a question about them to work. `python-docx` walks the body only, so this
+   means reading the package's other XML parts directly — `word/header1.xml`, `word/footnotes.xml`
+   — which is a morning's work and closes the gap that has already produced one wrong-looking
+   answer in testing. PowerPoint SmartArt and chart data are the same shape of problem, one layer
+   deeper into the XML.
+
    *Formats we do not accept at all* — `.doc` (the old binary Word format, which needs a converter,
-   not a parser), `.odt`, `.rtf`, `.txt`, `.md`, `.epub`. And inside formats we do accept:
-   `python-docx` cannot reach headers, footers or text boxes, PowerPoint SmartArt is a drawing, and
-   a two-column PDF can come out interleaved. None of these need OCR. They need more extractors
-   behind the same `Page` interface, which is why extraction was built as one function per format
-   returning a shared shape.
+   not a parser), `.odt`, `.rtf`, `.txt`, `.md`, `.epub`. None of these need OCR. They need more
+   extractors behind the same `Page` interface, which is why extraction was built as one function
+   per format returning a shared shape.
 
 6. **Measure instead of assert.** Seed 50,000 turns and run `EXPLAIN` on the cursor queries, so
    "this scales" is a number rather than a claim.
-7. **Hybrid retrieval.** Document search is lexical (Postgres full-text). Adding embeddings behind
-   the same `Retriever` interface would improve recall on paraphrased questions.
-8. **Monthly partitioning** of `turn_attempts` and `messages`, the two tables that grow without
+7. **Hybrid retrieval**, and I would move it up this list on the strength of one real failure.
+   Asked for a report's submission date, the tutor said honestly that it could not find one — while
+   slide 1 read `AUGUST 2026`. The query was *report summary submission date*, and **a date does not
+   contain the word "date"**. Lexical search matches words; it has no concept that `AUGUST 2026` is
+   a date, that "how plants eat" is photosynthesis, or that "the method they used" is a methodology
+   section. Those are not ranking bugs to tune away — they are the boundary of the technique. The
+   fix is embeddings alongside the `tsvector`, both queried and their results merged, which is why
+   search sits behind one service function rather than being inlined into the tool. It needs a
+   second model, which is the only reason it is not built.
+8. **Stop past answers outranking the materials.** A question answered badly once tends to be
+   answered badly again: the earlier reply sits in the room's context and the model recaps itself
+   rather than searching — *"we just talked about this"*. Verified precisely, in
+   [known limitations](#known-limitations). Prompting helps and does not win. The fix is to record
+   on each turn whether it was grounded in a document, and drop ungrounded answers from context when
+   the same topic returns, so the tutor's own guess never competes with the student's handout.
+9. **Move prompt activation next to the prompts.** Which version is live is a constant in
+   `app/services/turn.py`, so adding `v7.md` and forgetting that line leaves the new prompt inert —
+   which happened, cost several hours, and is now caught by a test rather than prevented. Putting
+   `status: active` in the prompt's own front-matter makes adding and switching one edit in one
+   directory. Pinning stays deliberate; it just stops living in a file nobody thinks to open.
+10. **Monthly partitioning** of `turn_attempts` and `messages`, the two tables that grow without
    bound, and a retention job for the large `raw_response` payloads.
-9. **Real auth**, replacing the `X-Student-Id` header.
+11. **Real auth**, replacing the `X-Student-Id` header.
 
 ---
 
