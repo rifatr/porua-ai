@@ -25,10 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiClient:
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, timeout_seconds: int = 30) -> None:
         if not api_key or api_key == "replace-me":
             raise ValueError("GEMINI_API_KEY is not set.")
-        self._client = genai.Client(api_key=api_key)
+        # Milliseconds — the SDK's unit, and worth stating because passing
+        # seconds here would set a 30ms timeout and fail every call in a way that
+        # looks like a network fault rather than a configuration one.
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
+        )
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         config = types.GenerateContentConfig(

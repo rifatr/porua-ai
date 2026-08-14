@@ -42,7 +42,10 @@ def get_llm_client() -> LLMClient:
 
     from app.llm.gemini import GeminiClient
 
-    real = GeminiClient(settings.gemini_api_key)
+    real = GeminiClient(
+        settings.gemini_api_key,
+        timeout_seconds=settings.llm_request_timeout_seconds,
+    )
 
     if mode == "record":
         from app.llm.fixtures import RecordingClient
