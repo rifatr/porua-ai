@@ -15,6 +15,7 @@ from app.services.turn import (
     TUTOR_PROMPT,
     TUTOR_PROMPT_VERSION,
 )
+from app.skills import quiz_builder, step_solver
 
 
 def test_loads_the_tutor_prompt() -> None:
@@ -65,6 +66,8 @@ def test_latest_version_finds_the_highest_on_disk() -> None:
     [
         (TUTOR_PROMPT, TUTOR_PROMPT_VERSION),
         (REPAIR_PROMPT, REPAIR_PROMPT_VERSION),
+        (quiz_builder.PROMPT_NAME, quiz_builder.PROMPT_VERSION),
+        (step_solver.PROMPT_NAME, step_solver.PROMPT_VERSION),
     ],
 )
 def test_the_pinned_prompt_is_the_newest_one_written(name: str, pinned: int) -> None:
