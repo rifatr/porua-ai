@@ -18,6 +18,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.skill import SkillRunRead
+
 
 class TurnCreate(BaseModel):
     message: str = Field(
@@ -191,6 +193,14 @@ class TurnDetail(TurnRead):
     )
     tokens: TokenUsage
     attempts: list[AttemptRead]
+    skill_run: SkillRunRead | None = Field(
+        default=None,
+        description=(
+            "Present when this turn was a skill — a quiz, a solved equation. The "
+            "attempts above are that skill's model calls, with `purpose` set to "
+            "`skill`, so one endpoint explains a quiz and a conversation alike."
+        ),
+    )
 
     @classmethod
     def from_model(cls, turn) -> "TurnDetail":
@@ -222,4 +232,7 @@ class TurnDetail(TurnRead):
                 total=prompt + output + thought,
             ),
             attempts=[AttemptRead.model_validate(a) for a in turn.attempts],
+            skill_run=(
+                SkillRunRead.model_validate(turn.skill_run) if turn.skill_run else None
+            ),
         )
