@@ -8,6 +8,12 @@ is the usual reason a new table is missing from a migration.
 from app.db.base import Base
 from app.models.document import Document, DocumentChunk
 from app.models.room import Room
+from app.models.skill_run import (
+    QuizChoice,
+    QuizQuestion,
+    SkillRun,
+    SkillStatus,
+)
 from app.models.student import Student
 from app.models.tool_call import ToolCall
 from app.models.turn import Turn, TurnFailureReason, TurnStatus
@@ -18,7 +24,11 @@ __all__ = [
     "Base",
     "Document",
     "DocumentChunk",
+    "QuizChoice",
+    "QuizQuestion",
     "Room",
+    "SkillRun",
+    "SkillStatus",
     "Student",
     "ToolCall",
     "Turn",

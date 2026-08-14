@@ -48,6 +48,7 @@ from app.db.base import Base, CreatedAtMixin, UUIDPrimaryKey
 
 if TYPE_CHECKING:
     from app.models.room import Room
+    from app.models.skill_run import SkillRun
     from app.models.turn_attempt import TurnAttempt
 
 
@@ -164,6 +165,15 @@ class Turn(UUIDPrimaryKey, CreatedAtMixin, Base):
         if self.completed_at is None:
             return None
         return int((self.completed_at - self.created_at).total_seconds() * 1000)
+
+    # A turn produces at most one skill run — a quiz, a solved equation. Null on
+    # an ordinary tutor turn.
+    skill_run: Mapped["SkillRun | None"] = relationship(
+        back_populates="turn",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
     __table_args__ = (
         # Turn numbers are unique within a room, so the sequence cannot fork if
