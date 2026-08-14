@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class QuizChoiceRead(BaseModel):
@@ -28,16 +28,6 @@ class QuizChoiceRead(BaseModel):
     position: int
     text: str
     is_correct: bool
-
-    @computed_field
-    @property
-    def label(self) -> str:
-        """A, B, C, D — rendered rather than stored.
-
-        The letter is a presentation detail of the position it already has;
-        storing both would be two facts that can disagree.
-        """
-        return chr(ord("A") + self.position)
 
 
 class QuizQuestionRead(BaseModel):
