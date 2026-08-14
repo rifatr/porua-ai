@@ -126,6 +126,23 @@ async def test_slides_are_indexed_with_speaker_notes(
     assert result["passages"][0]["cite"] == "lecture.pptx, page 1"
 
 
+async def test_text_inside_grouped_shapes_is_not_lost(
+    client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
+) -> None:
+    """A group is a shape holding shapes and has no text of its own, so reading
+    only the top-level shapes drops everything inside one — with no error and no
+    warning, just a deck that quietly lacks what is on the screen. Decks group
+    constantly, and the grouped slides tend to be the ones worth searching."""
+    room = await add_room(db, student)
+    status, _ = await upload(
+        client, auth, room, "diagram.pptx", make.pptx_with_grouped_shapes()
+    )
+    assert status == 201
+
+    for phrase in ("loose", "grouped", "nested"):
+        assert await run_search(db, room, phrase), f"{phrase!r} text was dropped"
+
+
 async def test_the_same_file_twice_is_not_indexed_twice(
     client: AsyncClient, auth: dict[str, str], db: AsyncSession, student: Student
 ) -> None:

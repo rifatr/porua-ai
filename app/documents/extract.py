@@ -15,16 +15,39 @@ without a page. Inventing a number would be worse than omitting one: the tutor
 would quote it to the student, the student would turn to page 4, and it would not
 be there. A missing citation is a gap; a confident wrong one is a lie.
 
-## Deliberate limits, written down rather than hidden
+## What is not extracted
 
-- `python-docx` does not expose headers, footers or text boxes. Text there is
-  lost, silently, because the library gives us no way to know it existed.
-- PowerPoint SmartArt is a drawing, not text, and is not extracted.
-- A two-column PDF can come out interleaved. PyMuPDF reads in layout order, which
-  is usually right and is not always right.
-- There is no OCR. A scanned PDF is **rejected**, not accepted as empty — see
-  `NO_TEXT_LAYER` below. Accepting it would leave a document in the room that
-  looks searchable, matches nothing, and gives no clue why.
+Every gap here is silent. A file with text in one of these places produces no
+error and no warning — it produces a document that quietly does not contain what
+the student can see on their screen, and the first sign of trouble is the tutor
+saying the material does not cover something it visibly does. That is why the
+list is written out rather than left to be discovered.
+
+**Word (`.docx`)** — headers, footers, text boxes, footnotes, endnotes, comments
+and embedded chart data. `python-docx` walks the document body, and none of those
+live in it. Headers and footers are the one that bites: a cover page's date,
+course code or supervisor name is very often in a footer, and none of it reaches
+us. Fixing it means reading the package's other XML parts directly.
+
+**PowerPoint (`.pptx`)** — SmartArt (a drawing, not text), chart data, WordArt
+and images. Text inside **grouped** shapes *is* read: a group is a shape holding
+shapes and has no text of its own, so iterating only the top level silently lost
+whole diagrams and their labels. `_flatten` below recurses for that reason.
+
+**PDF** — images, and any formula or figure rendered as one. A two-column layout
+can come out interleaved; PyMuPDF reads in layout order, which is usually right
+and is not always right.
+
+**All three** — no OCR. A scanned PDF is *rejected*, not accepted as empty, and
+so is one whose fonts carry no character map. Accepting either would leave a
+document in the room that looks searchable, matches nothing, and gives no clue
+why.
+
+A separate limit belongs to search rather than extraction, and is worth knowing
+here because it looks like an extraction failure: full-text search matches words,
+so it cannot answer "what is the submission date" from a slide reading
+`AUGUST 2026`. The date is extracted perfectly and is unfindable by the word
+"date". See the README's more-time list.
 """
 
 import logging
@@ -38,6 +61,7 @@ from docx import Document as DocxDocument
 from docx.table import Table as DocxTable
 from docx.text.paragraph import Paragraph as DocxParagraph
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.api.errors import UnreadableFileError
 from app.documents.detect import DocumentKind
@@ -272,7 +296,7 @@ def _extract_pptx(data: bytes) -> list[Page]:
     for number, slide in enumerate(presentation.slides, 1):
         parts: list[str] = []
 
-        for shape in slide.shapes:
+        for shape in _flatten(slide.shapes):
             if shape.has_table:
                 parts.extend(_table_rows(shape.table))
             elif shape.has_text_frame:
@@ -290,6 +314,25 @@ def _extract_pptx(data: bytes) -> list[Page]:
         pages.append(Page(number=number, text="\n\n".join(parts)))
 
     return pages
+
+
+def _flatten(shapes):
+    """Every shape on a slide, including the ones inside groups.
+
+    A group is a shape containing shapes, and it has no text of its own — so
+    iterating `slide.shapes` and asking each for its text silently loses
+    everything inside one. Decks group constantly: a labelled diagram, a callout
+    with its arrow, a figure with its caption. Those are usually the slides worth
+    searching, and the loss leaves no trace — no error, no warning, just a
+    document that quietly does not contain what the student can see on screen.
+
+    Recursive because groups nest.
+    """
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            yield from _flatten(shape.shapes)
+        else:
+            yield shape
 
 
 def _table_rows(table) -> list[str]:
