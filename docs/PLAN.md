@@ -166,7 +166,7 @@ Ten tables. Here is how they connect:
 students ──< rooms ──< turns ──< turn_attempts ──< tool_calls
                 │        │
                 │        └──< messages
-                │        └──< skill_runs ──< quizzes ──< quiz_questions ──< quiz_choices
+                │        └──< skill_runs ──< quiz_questions ──< quiz_choices
                 ├──< documents ──< document_chunks
                 └──< room_summaries
 ```
@@ -264,6 +264,7 @@ GET    /documents/{id}                            processing status
 DELETE /documents/{id}
 
 POST   /rooms/{id}/skills/{skill_name}/runs       run a skill directly
+GET    /rooms/{id}/skills/runs
 GET    /skill-runs/{id}
 
 GET    /healthz
@@ -415,6 +416,25 @@ decides when each card is due. The model writes content, the algorithm owns the 
 
 Every skill is stored as `name@version` with its prompt file, output schema, checks, repair rules,
 and where it saves to. Every run creates a `skill_runs` row with the check results.
+
+**Built, with two things settled during S6 that this section left open.**
+
+*A skill run is a turn.* `skill_runs.turn_id` is `UNIQUE NOT NULL`, exactly as the §5 diagram
+shows. So the model calls a skill makes are `turn_attempts` rows with `purpose='skill'` — the value
+that has been in the enum since S2 — and `GET /turns/{id}` inspects a quiz in the same detail as a
+conversation. The first attempt hung `skill_runs` off `rooms` with its attempts in a JSONB column;
+it was reversed before being committed, because it left the project with two audit trails of
+different shapes while the brief asks for one.
+
+*No separate `quizzes` table.* A run produces at most one quiz, so a `quizzes` row between
+`skill_runs` and `quiz_questions` would have carried nothing but a second id. `quiz_questions.run_id`
+points straight at the run. The two indexes in §5 are unchanged, and they are the reason a quiz gets
+tables at all rather than a JSONB blob.
+
+*Step 5 of `quiz_builder` above — "drop the bad questions" — was not built.* A partial quiz is a
+worse answer than none: the checks are per-question, so dropping the failures leaves a quiz of the
+wrong length, which is itself one of the four named failures. The run fails with `CHECKS_FAILED` and
+keeps every attempt and verdict instead.
 
 ---
 
@@ -594,7 +614,7 @@ as the bridge between "what to build" (§3) and "when to build it" (below).
 | **S3 Reliability** | Fixtures prove S2 returns junk. Then build parse → schema → content → repair. | **12**, 17, 27, 28, 38 | — |
 | **S4 Tools** | Tool registry, the five protections, `query_study_history` + `evaluate_expression` | **9**, **13**, 22, 29, 34 | `tool_calls` |
 | **S5 Documents** | Upload, file checking, three extractors, chunking, search, the bad-file cases | **7**, **8**, 23, 30, 37 | `documents`, `document_chunks` |
-| **S6 Skills** | `quiz_builder` and `step_solver` with all their checks | **10**, **11**, 18, 19, 20, 21 | `skill_runs`, `quizzes`, `quiz_questions`, `quiz_choices` |
+| **S6 Skills** | `quiz_builder` and `step_solver` with all their checks | **10**, **11**, 18, 19, 20, 21 | `skill_runs`, `quiz_questions`, `quiz_choices` |
 | **S7 History** | Study history endpoint over a date range | **6** | — |
 | **S8 Extras** | Everything left in P2, plus P3 if somehow ahead | 31, 32, 35, 40 | `room_summaries` |
 | **S9 Ship** | README, demo script, rubric check, repo, collaborators, archive | **15**, 41, 42 | — |
@@ -777,6 +797,7 @@ change your mind. Writing it on Saturday from memory does not work.
 | Streaming replies (SSE) | Streaming would hide the repair loop, which is the interesting part. |
 | Vector / embedding search | "Fixed model" is read as applying to the chat model. Text search is enough here and needs no second model. The search code sits behind an interface so embeddings could drop in later. |
 | Code execution sandbox | The best tool we are not building, and the first thing to add with more time. `evaluate_expression` covers the subset that can be *proved* safe — an AST allow-list over expressions. Going further needs an isolated container, no network, memory and PID limits, a hard timeout, and cleanup that survives a hang. That is a service, not a function. A large probably-safe sandbox is worth less than a small provably-safe one, and would hand the reviewer a hole to poke. |
+| Skills the tutor can call | Skills are client-invoked, so a student who asks conversationally — "quiz me on photosynthesis" — gets a quiz written as prose with none of §8's checks, while the checked builder sits behind an endpoint. The natural request routes to the worse path, which contradicts §2's rule that nothing unchecked reaches the user. A prose redirect was considered and dropped: with no web UI the tutor has nothing to point at, and an endpoint path is not a sentence to say to a student. The fix is skills as model-callable tools, and after S6 most of the plumbing exists — a skill invoked mid-turn attaches its attempts to the tutor's turn with `purpose='skill'`, and the tool would return a reference rather than the quiz. What blocks it: `tool_timeout_seconds` is 8 and a skill makes its own model calls, so timeouts must become per-tool; `UNIQUE(turn_id)` needs a clean refusal for a second call in one turn; and the 45-second deadline becomes the tightest budget in the project. |
 | Web search | Needs a second paid API key. A reviewer running `docker compose up` with only a Gemini key would find a tool that never works — a broken setup instruction. A tutor should also ground in the student's own uploaded materials rather than the open web. |
 | Paged study history | Study history caps its two lists (50 rooms, 15 concepts) and its range (366 days) instead of paging. For a summary that is the right trade: nobody asks for page three of "what did I study", and offset paging over a `GROUP BY` re-runs the whole aggregation per page — same cost, less returned. The cap does leave one rough edge: `total_turns` sums the rooms returned, so for a student past 50 rooms it is a total of what they see, not of the range. The proper fix is keyset pagination on `(last_studied_at, room_id)` plus a separate `COUNT` for the true total, and a `has_more` flag so a caller knows which of the two they are holding. That is a real API change, not a tuning change, so it waits until something actually needs to walk the full list. |
 

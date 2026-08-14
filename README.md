@@ -23,7 +23,7 @@ and tests, rather than a layer at a time. The reasoning is in
 | **S3** Reliability | Parse → schema → content checks → repair loop, with retries | ✅ Done |
 | **S4** Tools | Tool registry with hard limits, study-history and calculator tools | ✅ Done |
 | **S5** Documents | Upload and extract `.docx` / `.pdf` / `.pptx`, full-text search over them | ✅ Done |
-| **S6** Skills | Quiz builder and step-by-step maths solver, both verified in code | ⬜ Not started |
+| **S6** Skills | Quiz builder and step-by-step maths solver, both verified in code | ✅ Done |
 | **S7** History | Study history over a date range | ✅ Done — pulled into S4 |
 
 S7 came early because the study-history *query* is the expensive part and S4's tool
@@ -105,7 +105,17 @@ curl -s -X POST "localhost:8000/rooms/$ROOM_ID/turns" \
   -H 'Content-Type: application/json' -H "X-Student-Id: $SID" \
   -d '{"message":"What method does my handout use for simultaneous equations?"}' | jq
 
-# 9. Delete a room, twice. Both return 204 — it is idempotent — and the row survives.
+# 9. Build a quiz. Checked in code, then stored — and it becomes a turn in the room.
+curl -s -X POST "localhost:8000/rooms/$ROOM_ID/skills/quiz_builder/runs" \
+  -H 'Content-Type: application/json' -H "X-Student-Id: $SID" \
+  -d '{"topic":"solving equations","question_count":5}' | jq
+
+# 10. Solve one, with every step checked by sympy before you see it.
+curl -s -X POST "localhost:8000/rooms/$ROOM_ID/skills/step_solver/runs" \
+  -H 'Content-Type: application/json' -H "X-Student-Id: $SID" \
+  -d '{"problem":"3x + 6 = 15"}' | jq '.result, .checks'
+
+# 11. Delete a room, twice. Both return 204 — it is idempotent — and the row survives.
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "localhost:8000/rooms/$ROOM_ID" -H "X-Student-Id: $SID"
 curl -s "localhost:8000/rooms/$ROOM_ID" -H "X-Student-Id: $SID" | jq .archived_at
 ```
@@ -118,6 +128,18 @@ Step 5 is the one worth looking at. A real turn against `gemini-2.5-flash` repor
 
 Thinking cost four times the visible answer. It is billed and never appears in the reply, which is
 why it is counted separately rather than folded into `output`.
+
+Step 10 prints the verification, which is the part worth seeing — each step with whether a
+computer algebra system agreed with it:
+
+```json
+{"position": 1, "expression": "3x = 9", "verified": true},
+{"position": 2, "expression": "x = 3",  "verified": true}
+```
+
+Follow either run's `turn_id` to `GET /turns/{id}` and you get the prompts, the raw replies and the
+token counts, with `purpose: "skill"` on each attempt — the same endpoint that explains a
+conversation.
 
 Step 8 is the other one worth looking at. Inspect that turn and the `tool_calls` array shows what
 the model asked for and what came back — including the finished citation string it was handed, so
@@ -161,7 +183,7 @@ Every command works either way. Inside Docker, prefix with `docker compose exec 
 ### Tests
 
 ```bash
-pytest                       # all 232
+pytest                       # all tests
 pytest -q                    # quiet
 pytest tests/test_turns.py   # one file
 pytest -k "cursor"           # by name
@@ -310,6 +332,7 @@ app/
   documents/        reading uploads: detect → extract → chunk. No database, no I/O
   llm/              the provider boundary: one Protocol, a Gemini client, record/replay
   reliability/      parse → schema → content. Pure functions, no I/O, no database
+  skills/           a prompt plus code that checks its output; sympy lives here
   tools/            what the model may ask for; the fixed registry
   models/           SQLAlchemy models (the database)
   prompts/          the loader; the prompt text itself lives in prompts/ at the root
@@ -387,6 +410,129 @@ still hang the process. Worth knowing: the 8-second tool timeout does **not** he
 `asyncio.wait_for` cannot interrupt synchronous CPU work. The limits are the real defence.
 
 `tests/test_calculator.py` runs eleven real attacks, including both subclass walks.
+
+### A skill is a prompt plus code that checks it
+
+The brief sets the bar: skills must *"provide real student value, extend the LLM's capabilities,
+and not be renamed versions of the same prompt."* That last clause is the design constraint, and
+the answer is that the prompt is the smallest part of each one.
+
+**`step_solver`** asks for working, then checks every line with sympy before the student sees it.
+The rule is not "does this look like the previous line minus 6" — it is **do these two equations
+have the same solution set**, which catches any slip without knowing what operation was claimed:
+
+```
+3x + 6 = 15  →  3x = 9      ✓
+3x + 6 = 15  →  3x = 8      ✗  arithmetic slip
+2(x-4) = 10  →  2x - 4 = 10 ✗  forgot to distribute
+x² - 4 = 0   →  x = 2       ✗  dropped a root
+```
+
+A failing step is sent back to be redone with the failing line named. And the skill **declines**
+what it cannot verify — `UNCHECKABLE_PROBLEM`, before spending a model call — because without its
+checks it would be the renamed prompt the brief warns about, and the tutor already handles word
+problems perfectly well.
+
+sympy never sees the raw string. `sympify` runs Python and has had sandbox escapes, and this input
+comes from a student *by way of* a language model, so an allow-list runs first — the same posture
+as `evaluate_expression`. Three hostile inputs are tested.
+
+**The allow-list stops code, not cost, and that needed a separate answer.** `9^9^9` is six
+characters, every one of them permitted, and evaluating it asks Python for a 370-million-digit
+integer on the event loop with nothing able to interrupt it. `x^99999` parses in a millisecond and
+then never leaves `solveset`. Neither is an escape; both are a hang, which for a synchronous API is
+the same outcome. So powers are bounded before any arithmetic happens — the expression is parsed
+once with `evaluate=False`, the tree is checked, and only what survives is parsed for real. The two
+limits differ because the costs do: a number to a number costs digits, a *variable* to a number
+costs polynomial degree, and degree is far more expensive than it looks (measured: degree 20 takes
+0.4s, degree 50 takes 2.2s, degree 100 takes 14.6s).
+
+Symbol count is the other gate, and it exists because parsing proves sympy could *read* a string,
+not that the string is maths. "Give me a quiz on TCP" is letters and spaces, so it passes the
+allow-list and implicit multiplication turns it into a product of fourteen symbols — a valid
+expression nobody asked to solve. It used to cost three model calls and then fail as
+`CHECKS_FAILED`, which is the wrong reason as well as the slow one. Real school algebra has one or
+two unknowns, and above one the checker was already dropping to a weaker fallback, so refusing past
+three says out loud what was happening quietly.
+
+**`quiz_builder`** handles the four failures the brief names, in four different places, and where
+each one lives is the interesting part:
+
+| Failure | Caught by | Why there |
+|---|---|---|
+| duplicate choices | code, then `ux_choice_text` | code names it for a retry; the index makes it unstorable |
+| wrong count | code only | a fact about a *set* of rows — a constraint would need a trigger |
+| invalid answer | code, then `ux_choice_correct` | same pair of reasons as duplicates |
+| **predictable positions** | **code alone, by shuffling** | see below |
+
+The last row cannot be a check. No single quiz is wrong for putting the answer in slot B — it is a
+bias across many — and instructing the model to vary it does not work, because it is not
+disobeying anything. So the options are shuffled afterwards with a seeded generator and the
+property becomes true by construction. The seed comes from the request via `hashlib`, not the
+built-in `hash()`, which Python randomises per process: that would have been stable within a run
+and different on the next one, which is a test that passes until it does not.
+
+Both database indexes were verified by inserting bad rows by hand:
+
+```
+ERROR: duplicate key value violates unique constraint "ux_choice_text"     -- "  paris " vs "Paris"
+ERROR: duplicate key value violates unique constraint "ux_choice_correct"  -- a second right answer
+```
+
+If the checks cannot be satisfied in three attempts the run **fails** rather than degrading. A
+quiz with two identical options is worse than no quiz, and the failed row keeps every prompt,
+every reply and exactly which rule rejected each one.
+
+### What I would change here next
+
+**The repair prompt is weaker than the tutor's, and it is the same repo.**
+`prompts/tutor_repair/v1.md` is a separate versioned file that shows the model its own rejected
+output between markers, labelled as data. A skill instead pastes an instruction from Python onto
+the end of the original prompt, so the model is told *"question 1 has two options reading
+'paris'"* without being shown question 1 — it regenerates rather than repairs, and mostly gets
+away with it. Two consequences follow. `prompt_sha256` on a repair attempt describes only the base
+file, so the checksum no longer identifies the text that was actually sent (`rendered_prompt` still
+holds the truth, so nothing is lost — but the column claims something false, which is worse than
+absent for an audit trail). And PLAN §11 lists `quiz_repair` as a prompt to write; it shipped as a
+string constant. The fix is two prompt files and threading `previous_output` through
+`skills/base.generate`, which is the shape the tutor already proves works.
+
+**Three checks from PLAN §8 are not implemented**: distractors that are reworded copies of the
+answer, every question backed by an uploaded file when the room has one, and language suited to the
+education level. The prompt asks for all three; nothing verifies them.
+
+**`source` is an unverified claim.** The model writes it, and nothing checks it against the
+citations that were actually offered — yet the turn's summary tells the student *"3 of them from
+your uploaded material"*. A set-membership test against the passages handed to the prompt would
+make it true rather than asserted, and would also bound the only unchecked model string going into
+a `String(300)` column.
+
+**The API should be one endpoint, not four.** `POST /rooms/{id}/turns` with a body discriminated on
+`skill`, returning `content` discriminated on `type` — which is what "a skill run is a turn" says
+the surface should look like. Per-skill routes exist because a shared endpoint taking an untyped
+`dict` could not document each skill's arguments in Swagger; a discriminated union solves that
+without the route sprawl, and would replace `result: dict | None` with a typed shape. Not done
+because it is a surface refactor with no new capability, and it would have meant rewriting a
+passing test file on the deadline.
+
+### A skill run is a turn
+
+`skill_runs.turn_id` is `UNIQUE NOT NULL`. Asking for a quiz is asking the room a question, so a
+run creates a turn and everything follows from that: the model calls are `turn_attempts` rows with
+`purpose='skill'`, the quiz appears in the room's timeline where the student asked for it,
+`GET /turns/{id}` inspects it in the same detail as a conversation, and study history counts it as
+work done.
+
+The first version hung `skill_runs` off `rooms` with its attempts in a JSONB column. It worked, and
+it was wrong: the project then had **two audit trails of different shapes**, so "inspect the model
+attempts" meant one thing for a chat and another for a quiz — while the brief asks for one. It was
+reversed before being committed. The tell was that `AttemptPurpose.SKILL` had been sitting in the
+enum since S2 and my design made it unreachable.
+
+`terminal_states_are_complete` then forces a good detail rather than needing a workaround: a
+succeeded turn must carry an answer, so every skill returns a one-line summary — *"Here is a
+5-question quiz on photosynthesis, 3 of them from your uploaded material"*. That is what belongs in
+a timeline; the quiz itself is a click away.
 
 ### Tools and structured output cannot be used together
 
@@ -709,7 +855,18 @@ The scheme, since the brief asks for prompts to be *"readable and versioned"*:
 
 Current, honest:
 
-- **S0 to S5 are built, plus S7.** No skills (S6) yet.
+- **The tutor cannot invoke a skill.** Skills are client-invoked — `POST
+  /rooms/{id}/skills/{name}/runs` — and a client renders them as actions, which is what the
+  optional web interface would have been. The gap is real and worth stating plainly: a student who
+  types "quiz me on photosynthesis" into the chat gets a quiz *written as prose*, with none of the
+  checks in `app/skills/quiz_builder.py` — no duplicate detection, no single-correct-answer rule,
+  no position shuffling, nothing stored. The reliable path exists and the conversational path
+  competes with it.
+
+  Telling the tutor to redirect was considered and dropped: with no UI it has nothing to point at,
+  and *"use `POST /rooms/{id}/skills/quiz_builder/runs`"* is not a sentence to say to a Class 8
+  student. The real fix is skills as model-callable tools, and what blocks it is named in [what I
+  would do with more time](#what-i-would-do-with-more-time).
 - **Document processing is synchronous.** Measured: a text-heavy PDF parses at roughly 1.5 MB per
   second, so 4.4 MB takes ~3 s and a 20 MB worst case around 14 s. The caller waits that long. The
   trade is deliberate — extraction is where most bad files are *discovered*, and doing it in the
@@ -795,7 +952,7 @@ Current, honest:
 
 Planned and already decided against (with reasons in [`docs/PLAN.md` §16](docs/PLAN.md)): no web
 UI, no OCR for scanned or undecodable PDFs, no formats beyond the three the brief names, no
-streaming responses, no job queue, no vector search, no web search, no code-execution sandbox. Tools were picked against a four-part test — the test and the full list
+streaming responses, no job queue, no vector search, no web search, no code-execution sandbox, and skills the tutor cannot call. Tools were picked against a four-part test — the test and the full list
 of what it rejected are in [`docs/PLAN.md` §8](docs/PLAN.md).
 
 ---
@@ -837,7 +994,17 @@ that was never dropped on downgrade, and a column type that had diverged from it
 
 In priority order:
 
-1. **Finish S4–S7.** Tools, documents, skills and study history.
+1. **Let the tutor invoke skills.** The one gap that contradicts this project's own claim. A
+   student who types "quiz me" gets an unchecked quiz written as prose, while the checked builder
+   sits behind an endpoint they have to know about — so the natural request routes to the worse
+   path. The plumbing is mostly there after S6: a skill invoked mid-turn already attaches its
+   attempts to the tutor's turn with `purpose='skill'`, and `skill_runs.turn_id` already points at
+   it, so the tool would return a *reference* — "5 questions created" — and the quiz itself would
+   never re-enter the model's context. Three things block it, and they are small but real:
+   `tool_timeout_seconds` is 8 while a skill makes 1–3 model calls of its own, so timeouts need to
+   be per-tool; `UNIQUE(turn_id)` means a second `build_quiz` in one turn must be refused cleanly
+   rather than hitting the constraint; and the 45-second turn deadline becomes the tightest budget
+   in the project. Roughly an afternoon, and it is the first thing I would spend one on.
 2. **Give thinking its own budget, and route `MAX_TOKENS` to the retry path.** Thinking is billed
    against `max_output_tokens` on `gemini-2.5-flash`, so one allowance covers both. A multi-step
    question can spend 1,300–2,000 tokens reasoning and leave too little to write with — one
