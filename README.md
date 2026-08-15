@@ -8,7 +8,7 @@ Built for the Monsha Software Engineer technical assessment
 ([`docs/ASSESSMENT.md`](docs/ASSESSMENT.md)).
 
 FastAPI · PostgreSQL 16 · SQLAlchemy 2 async · Alembic · `gemini-2.5-flash`
-19 endpoints · 11 tables · 7 migrations · 290 tests, none of which call the model
+19 endpoints · 10 tables · 6 migrations · 290 tests, none of which call the model
 
 ---
 
@@ -50,7 +50,7 @@ with arguments and results, and token usage separated into prompt / output /
 
 | Requirement | Where |
 |---|---|
-| Relational DB, real relationships and constraints and indexes | 11 tables, 7 migrations. Partial indexes, functional unique indexes, `CHECK` constraints, a generated `tsvector` |
+| Relational DB, real relationships and constraints and indexes | 10 tables, 6 migrations. Partial indexes, functional unique indexes, `CHECK` constraints, a generated `tsvector` |
 | At least 2 tools | 3 — `search_room_materials`, `query_study_history`, `evaluate_expression` |
 | At least 2 skills, not renamed prompts | 2 — `quiz_builder`, `step_solver`. Each is a prompt plus code that checks its output |
 | Prompts readable and versioned | [`prompts/<name>/v<N>.md`](prompts/), YAML front-matter, checksum stored per attempt |
@@ -347,11 +347,20 @@ tests override it with a fake that records the prompts it was given — which is
 how the education level and the room's earlier turns are asserted to have
 genuinely reached the model, rather than trusting the template.
 
-Fixtures come in two kinds. **Recorded** ones capture what the model actually
-does, which is the only way to find out whether a prompt works. **Hand-written**
-ones cover the failure modes the brief names, because you cannot ask Gemini for
-truncated JSON or a quiz with duplicate options on demand. Recorded fixtures
-alone would only test the model on its good days.
+**No recorded model responses are committed**, and the limit is worth naming
+rather than leaving to be discovered. Record and replay exist —
+`LLM_FIXTURE_MODE=record`, [`scripts/record_fixtures.py`](scripts/record_fixtures.py)
+— but a fixture is keyed by the exact request text, so every new prompt version
+makes the previous recordings unreachable, and `tutor_system` reached v7. What
+the real model actually did is therefore written down in the prompt changelogs,
+which is where the prompt-engineering history lives; it is not replayed in the
+suite.
+
+The malformations are hand-written, in
+[`tests/fixtures/llm/synthetic/`](tests/fixtures/llm/synthetic/), because you
+cannot ask Gemini for truncated JSON or a quiz with duplicate options on demand
+— and a suite built only on what the model does on a good day would never see
+the failures the brief names.
 
 Each test runs in a transaction that is rolled back, so order does not matter,
 and the HTTP client shares the test's session, so a test can assert on rows the

@@ -192,6 +192,12 @@ validation pipeline. Anything rejected there is a real prompt weakness worth a
 new version, not a fluke. Delete the old files in
 `tests/fixtures/llm/recorded/` when re-recording after a prompt change.
 
+**None of those recordings are committed**, so the directory does not exist in a
+fresh checkout and nothing in the test suite depends on it. The suite runs on
+`FakeLLM` plus the hand-written fixtures in `tests/fixtures/llm/synthetic/`.
+Recording is how you check a prompt against the real model, not a step in running
+the tests.
+
 ---
 
 ## Watching what the app is doing

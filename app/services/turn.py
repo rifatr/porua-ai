@@ -236,9 +236,9 @@ async def _run_tool(
         is never a partial row for a flush to catch.
 
         This is the opposite of `turn_attempts`, which *is* written before its
-        call. The difference is what a crash would cost: an attempt holds the
-        prompt, which is unrecoverable, while everything about a tool call is
-        already known from the attempt that requested it.
+        call. The difference is what a failure mid-call would cost: an attempt
+        holds the prompt, which nothing else records, while everything about a
+        tool call is already known from the attempt that requested it.
         """
         row.status = status.value
         row.result = result
@@ -423,8 +423,15 @@ async def create_turn(
             started_at=datetime.now(UTC),
         )
         db.add(attempt)
-        # Written before the call, so a crash mid-request still leaves evidence
-        # that the call was made and what was sent.
+        # Written before the call, so the prompt is already in the transaction by
+        # the time anything can go wrong with it — and every failure this loop
+        # handles ends by returning the turn, which commits.
+        #
+        # The limit is worth stating exactly, because it is easy to claim more: a
+        # flush is not a commit. One session spans the whole request, so an
+        # *unhandled* exception rolls these rows back with everything else.
+        # Surviving that would need a second session writing outside this
+        # transaction, which is a real change and not a line.
         await db.flush()
 
         # --- the call ---------------------------------------------------------

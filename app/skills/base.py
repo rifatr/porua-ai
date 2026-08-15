@@ -236,9 +236,10 @@ async def generate(
             started_at=datetime.now(UTC),
         )
         context.db.add(attempt)
-        # Written before the call, exactly as the tutor loop does it, so a crash
-        # mid-request still leaves evidence that the call was made and what was
-        # sent.
+        # Written before the call, exactly as the tutor loop does it — and with
+        # the same limit, which that loop states in full: a flush is not a commit,
+        # so the row survives every failure handled here and not an unhandled
+        # exception. See services/turn.py.
         await context.db.flush()
 
         try:
