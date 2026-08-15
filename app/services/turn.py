@@ -98,7 +98,7 @@ TUTOR_PROMPT = "tutor_system"
 # appearing. The cost of pinning is that adding a version and forgetting this line
 # leaves the new prompt inert — which happened once, in S5, and is why
 # `tests/test_prompts.py` now asserts these constants are the newest on disk.
-TUTOR_PROMPT_VERSION = 6
+TUTOR_PROMPT_VERSION = 7
 REPAIR_PROMPT = "tutor_repair"
 REPAIR_PROMPT_VERSION = 1
 
