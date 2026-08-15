@@ -113,7 +113,7 @@ more time and any decisions you want to defend.
 
 ## Deadline
 
-**15 July, 2026 — 6AM**
+**15 August, 2026 — 6AM**
 
 After submission, we will book a review call.
 
